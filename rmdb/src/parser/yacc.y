@@ -178,13 +178,15 @@ dml:
     {
         auto stmt = std::make_shared<SelectStmt>();
         stmt->has_distinct = $2;
-        // separate columns and aggregates from select items
+        // separate columns, aggregates, and expressions from select items
         for (auto &e : $3) {
             if (auto c = std::dynamic_pointer_cast<Col>(e)) {
                 stmt->cols.push_back(c);
             } else if (auto a = std::dynamic_pointer_cast<AggExpr>(e)) {
                 stmt->aggs.push_back(a);
                 stmt->is_agg = true;
+            } else {
+                stmt->exprs.push_back(e);
             }
         }
         stmt->tabs = $5;

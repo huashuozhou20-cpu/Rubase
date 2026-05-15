@@ -486,6 +486,7 @@ struct JoinExpr : public TreeNode {
 struct SelectStmt : public TreeNode {
     std::vector<std::shared_ptr<Col>> cols;
     std::vector<std::shared_ptr<AggExpr>> aggs;
+    std::vector<std::shared_ptr<Expr>> exprs;  // arithmetic and other expressions
     std::vector<std::string> tabs;
     std::vector<std::shared_ptr<JoinExpr>> joins;
     std::shared_ptr<CondExpr> cond;

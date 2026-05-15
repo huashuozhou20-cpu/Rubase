@@ -25,16 +25,20 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         query->tables = std::move(x->tabs);
         /** TODO: 检查表是否存在 */
 
-        // 处理target list，再target list中添加上表名，例如 a.id
+        // 处理 SELECT 投影列
         for (auto &sv_sel_col : x->cols) {
             TabCol sel_col = {.tab_name = sv_sel_col->tab_name, .col_name = sv_sel_col->col_name};
             query->cols.push_back(sel_col);
         }
-        
+
+        // 标记聚合和 DISTINCT
+        query->has_agg = x->is_agg;
+        query->has_distinct = x->has_distinct;
+
         std::vector<ColMeta> all_cols;
         get_all_cols(query->tables, all_cols);
         if (query->cols.empty()) {
-            // select all columns
+            // select * : expand to all columns
             for (auto &col : all_cols) {
                 TabCol sel_col = {.tab_name = col.tab_name, .col_name = col.name};
                 query->cols.push_back(sel_col);
@@ -45,12 +49,62 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                 sel_col = check_column(all_cols, sel_col);  // 列元数据校验
             }
         }
-        //处理where条件
+
+        // 处理 WHERE 条件
         get_clause(x->cond, query->conds);
         check_clause(query->tables, query->conds);
-    } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
-        /** TODO: */
 
+        // 处理 JOIN ON 条件
+        for (auto &join : x->joins) {
+            if (join->cond) {
+                std::vector<Condition> join_conds;
+                get_clause(join->cond, join_conds);
+                check_clause(query->tables, join_conds);
+                query->conds.insert(query->conds.end(), join_conds.begin(), join_conds.end());
+            }
+        }
+
+        // 处理 GROUP BY
+        if (x->group_by) {
+            for (auto &gb_col : x->group_by->cols) {
+                TabCol gb = {.tab_name = gb_col->tab_name, .col_name = gb_col->col_name};
+                check_column(all_cols, gb);
+            }
+        }
+
+        // 处理 HAVING 条件
+        if (x->having) {
+            std::vector<Condition> having_conds;
+            get_clause(x->having, having_conds);
+            check_clause(query->tables, having_conds);
+            // HAVING conditions are stored separately in the AST for the executor to use
+        }
+
+        // 校验 LIMIT 值
+        if (x->limit) {
+            if (x->limit->limit <= 0) {
+                throw InternalError("LIMIT must be greater than 0");
+            }
+        }
+    } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
+        // 处理表名
+        query->tables.push_back(x->tab_name);
+
+        // 处理 SET 子句
+        for (auto &sv_set : x->set_clauses) {
+            std::vector<ColMeta> all_cols;
+            get_all_cols({x->tab_name}, all_cols);
+            TabCol target = {.tab_name = "", .col_name = sv_set->col_name};
+            target = check_column(all_cols, target);
+            SetClause set_clause;
+            set_clause.lhs = target;
+            set_clause.rhs = convert_sv_value(sv_set->val);
+            query->set_clauses.push_back(set_clause);
+        }
+
+        // 处理 WHERE 条件
+        get_clause(x->cond, query->conds);
+        check_clause({x->tab_name}, query->conds);
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
         //处理where条件
         get_clause(x->cond, query->conds);
@@ -171,6 +225,11 @@ Value Analyze::convert_sv_value(const std::shared_ptr<ast::Value> &sv_val) {
         val.set_float(float_lit->val);
     } else if (auto str_lit = std::dynamic_pointer_cast<ast::StringLit>(sv_val)) {
         val.set_str(str_lit->val);
+    } else if (auto bool_lit = std::dynamic_pointer_cast<ast::BoolLit>(sv_val)) {
+        // store bool as int: 1 for true, 0 for false
+        val.set_int(bool_lit->val ? 1 : 0);
+    } else if (auto null_lit = std::dynamic_pointer_cast<ast::NullLit>(sv_val)) {
+        throw InternalError("NULL literal not yet supported in execution layer");
     } else {
         throw InternalError("Unexpected sv value type");
     }

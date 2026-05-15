@@ -269,6 +269,7 @@ private:
             if (x->has_distinct) print_val("DISTINCT", offset);
             print_node_list(x->cols, offset);
             if (!x->aggs.empty()) print_node_list(x->aggs, offset);
+            if (!x->exprs.empty()) print_node_list(x->exprs, offset);
             print_val_list(x->tabs, offset);
             if (!x->joins.empty()) print_node_list(x->joins, offset);
             if (x->cond) print_node(x->cond, offset);

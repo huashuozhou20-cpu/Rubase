@@ -34,6 +34,10 @@ class Query{
     std::vector<SetClause> set_clauses;
     //insert 的values值
     std::vector<Value> values;
+    // select distinct
+    bool has_distinct = false;
+    // select 中有聚合函数
+    bool has_agg = false;
 
     Query(){}
 
