@@ -23,7 +23,10 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
     {
         // 处理表名
         query->tables = std::move(x->tabs);
-        /** TODO: 检查表是否存在 */
+        // 检查表是否存在
+        for (auto &tab_name : query->tables) {
+            sm_manager_->db_.get_table(tab_name);  // throws TableNotFoundError
+        }
 
         // 处理 SELECT 投影列
         for (auto &sv_sel_col : x->cols) {
@@ -68,7 +71,18 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         if (x->group_by) {
             for (auto &gb_col : x->group_by->cols) {
                 TabCol gb = {.tab_name = gb_col->tab_name, .col_name = gb_col->col_name};
-                check_column(all_cols, gb);
+                gb = check_column(all_cols, gb);
+                // 确保 GROUP BY 列出现在 SELECT 列表中
+                bool in_select = false;
+                for (auto &sel_col : query->cols) {
+                    if (sel_col.tab_name == gb.tab_name && sel_col.col_name == gb.col_name) {
+                        in_select = true;
+                        break;
+                    }
+                }
+                if (!in_select) {
+                    throw InternalError("GROUP BY column '" + gb.col_name + "' must appear in SELECT list");
+                }
             }
         }
 
@@ -87,7 +101,8 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             }
         }
     } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
-        // 处理表名
+        // 检查表是否存在
+        sm_manager_->db_.get_table(x->tab_name);
         query->tables.push_back(x->tab_name);
 
         // 处理 SET 子句
@@ -106,6 +121,8 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         get_clause(x->cond, query->conds);
         check_clause({x->tab_name}, query->conds);
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
+        // 检查表是否存在
+        sm_manager_->db_.get_table(x->tab_name);
         //处理where条件
         get_clause(x->cond, query->conds);
         check_clause({x->tab_name}, query->conds);        
@@ -139,8 +156,9 @@ TabCol Analyze::check_column(const std::vector<ColMeta> &all_cols, TabCol target
         }
         target.tab_name = tab_name;
     } else {
-        /** TODO: Make sure target column exists */
-        
+        // 校验指定表中的列是否存在
+        TabMeta &tab = sm_manager_->db_.get_table(target.tab_name);
+        tab.get_col(target.col_name);  // throws ColumnNotFoundError if not found
     }
     return target;
 }
@@ -166,8 +184,11 @@ void Analyze::get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector
                 for (auto &arg : logic->args) {
                     traverse(arg);
                 }
+            } else if (logic->op == ast::LOGIC_OR) {
+                throw InternalError("OR is not yet supported in execution layer");
+            } else if (logic->op == ast::LOGIC_NOT) {
+                throw InternalError("NOT is not yet supported in execution layer");
             }
-            // OR and NOT are not supported at execution level yet
         } else if (auto binary = std::dynamic_pointer_cast<ast::BinaryExpr>(node)) {
             Condition c;
             c.lhs_col = {.tab_name = binary->lhs->tab_name, .col_name = binary->lhs->col_name};
@@ -180,8 +201,15 @@ void Analyze::get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector
                 c.rhs_col = {.tab_name = rhs_col->tab_name, .col_name = rhs_col->col_name};
             }
             conds.push_back(c);
+        } else if (auto unary = std::dynamic_pointer_cast<ast::UnaryCondExpr>(node)) {
+            throw InternalError("IS NULL / IS NOT NULL is not yet supported in execution layer");
+        } else if (auto like = std::dynamic_pointer_cast<ast::LikeExpr>(node)) {
+            throw InternalError("LIKE is not yet supported in execution layer");
+        } else if (auto between = std::dynamic_pointer_cast<ast::BetweenExpr>(node)) {
+            throw InternalError("BETWEEN is not yet supported in execution layer");
+        } else if (auto in_expr = std::dynamic_pointer_cast<ast::InExpr>(node)) {
+            throw InternalError("IN is not yet supported in execution layer");
         }
-        // UnaryCondExpr, LikeExpr, BetweenExpr, InExpr not supported at execution level yet
     };
 
     traverse(cond);
