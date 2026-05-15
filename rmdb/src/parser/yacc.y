@@ -22,8 +22,13 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
-// non-keywords
+%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP
+%token TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK
+%token ENABLE_NESTLOOP ENABLE_SORTMERGE
+%token AVG BETWEEN COUNT DISTINCT FULL GROUP HAVING IN INNER IS LEFT LIKE LIMIT
+%token MAX MIN NOT OFFSET ON OR RIGHT SUM
+
+// non-keywords (operators)
 %token LEQ NEQ GEQ T_EOF
 
 // type-specific tokens
@@ -31,29 +36,43 @@ WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_CO
 %token <sv_int> VALUE_INT
 %token <sv_float> VALUE_FLOAT
 %token <sv_bool> VALUE_BOOL
+%token VALUE_NULL
 
-// specify types for non-terminal symbol
+// specify types for non-terminal symbols
 %type <sv_node> stmt dbStmt ddl dml txnStmt setStmt
 %type <sv_field> field
 %type <sv_fields> fieldList
 %type <sv_type_len> type
 %type <sv_comp_op> op
 %type <sv_expr> expr
+%type <sv_exprs> selectItems selectItemList
 %type <sv_val> value
 %type <sv_vals> valueList
 %type <sv_str> tbName colName
-%type <sv_strs> tableList colNameList
+%type <sv_strs> colNameList fromList
 %type <sv_col> col
-%type <sv_cols> colList selector
+%type <sv_cols> colList
 %type <sv_set_clause> setClause
 %type <sv_set_clauses> setClauses
-%type <sv_cond> condition
-%type <sv_conds> whereClause optWhereClause
-%type <sv_orderby>  order_clause opt_order_clause
+%type <sv_cond> condition optWhereClause optHaving
+%type <sv_orderby> order_clause opt_order_clause
 %type <sv_orderby_dir> opt_asc_desc
 %type <sv_setKnobType> set_knob_type
+%type <sv_join> joinClause
+%type <sv_joins> joinList optJoinList
+%type <sv_groupby> optGroupBy
+%type <sv_limit> optLimit
+%type <sv_agg> aggExpr
+%type <sv_agg_type> aggType
+%type <sv_int> joinType
+%type <sv_bool> optDistinct
+
+// intermediate non-terminals for expression and condition trees
+%type <sv_cond> cond_or cond_and cond_not cond_base
+%type <sv_expr> expr_add_sub expr_mul_div expr_unary expr_base
 
 %%
+
 start:
         stmt ';'
     {
@@ -98,7 +117,7 @@ txnStmt:
     {
         $$ = std::make_shared<TxnAbort>();
     }
-    | TXN_ROLLBACK
+    |   TXN_ROLLBACK
     {
         $$ = std::make_shared<TxnRollback>();
     }
@@ -154,9 +173,32 @@ dml:
     {
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
-    |   SELECT selector FROM tableList optWhereClause opt_order_clause
+    |   SELECT optDistinct selectItems
+        FROM fromList optJoinList optWhereClause optGroupBy optHaving opt_order_clause optLimit
     {
-        $$ = std::make_shared<SelectStmt>($2, $4, $5, $6);
+        auto stmt = std::make_shared<SelectStmt>();
+        stmt->has_distinct = $2;
+        // separate columns and aggregates from select items
+        for (auto &e : $3) {
+            if (auto c = std::dynamic_pointer_cast<Col>(e)) {
+                stmt->cols.push_back(c);
+            } else if (auto a = std::dynamic_pointer_cast<AggExpr>(e)) {
+                stmt->aggs.push_back(a);
+                stmt->is_agg = true;
+            }
+        }
+        stmt->tabs = $5;
+        stmt->joins = $6;
+        // also add join table names to tabs for backward compatibility
+        for (auto &j : stmt->joins) {
+            stmt->tabs.push_back(j->tab_name);
+        }
+        stmt->cond = $7;
+        stmt->group_by = $8;
+        stmt->having = $9;
+        stmt->order = $10;
+        stmt->limit = $11;
+        $$ = stmt;
     }
     ;
 
@@ -176,7 +218,7 @@ colNameList:
     {
         $$ = std::vector<std::string>{$1};
     }
-    | colNameList ',' colName
+    |   colNameList ',' colName
     {
         $$.push_back($3);
     }
@@ -232,31 +274,314 @@ value:
     {
         $$ = std::make_shared<BoolLit>($1);
     }
+    |   VALUE_NULL
+    {
+        $$ = std::make_shared<NullLit>();
+    }
     ;
 
+// ============================================================================
+// Condition expression tree (WHERE / HAVING / ON)
+// Precedence: OR < AND < NOT < comparison
+// ============================================================================
+
 condition:
+        cond_or
+    ;
+
+cond_or:
+        cond_and
+    |   cond_or OR cond_and
+    {
+        $$ = std::make_shared<LogicExpr>(LOGIC_OR,
+              std::vector<std::shared_ptr<CondExpr>>{$1, $3});
+    }
+    ;
+
+cond_and:
+        cond_not
+    |   cond_and AND cond_not
+    {
+        $$ = std::make_shared<LogicExpr>(LOGIC_AND,
+              std::vector<std::shared_ptr<CondExpr>>{$1, $3});
+    }
+    ;
+
+cond_not:
+        cond_base
+    |   NOT cond_not
+    {
+        $$ = std::make_shared<LogicExpr>(LOGIC_NOT,
+              std::vector<std::shared_ptr<CondExpr>>{$2});
+    }
+    ;
+
+cond_base:
         col op expr
     {
         $$ = std::make_shared<BinaryExpr>($1, $2, $3);
     }
-    ;
-
-optWhereClause:
-        /* epsilon */ { /* ignore*/ }
-    |   WHERE whereClause
+    |   col IS VALUE_NULL
+    {
+        $$ = std::make_shared<UnaryCondExpr>($1, SV_OP_IS_NULL);
+    }
+    |   col IS NOT VALUE_NULL
+    {
+        $$ = std::make_shared<UnaryCondExpr>($1, SV_OP_IS_NOT_NULL);
+    }
+    |   col LIKE VALUE_STRING
+    {
+        $$ = std::make_shared<LikeExpr>($1, false, $3);
+    }
+    |   col NOT LIKE VALUE_STRING
+    {
+        $$ = std::make_shared<LikeExpr>($1, true, $4);
+    }
+    |   col BETWEEN value AND value
+    {
+        $$ = std::make_shared<BetweenExpr>($1, false, $3, $5);
+    }
+    |   col NOT BETWEEN value AND value
+    {
+        $$ = std::make_shared<BetweenExpr>($1, true, $4, $6);
+    }
+    |   col IN '(' valueList ')'
+    {
+        $$ = std::make_shared<InExpr>($1, false, $4);
+    }
+    |   col NOT IN '(' valueList ')'
+    {
+        $$ = std::make_shared<InExpr>($1, true, $5);
+    }
+    |   '(' condition ')'
     {
         $$ = $2;
     }
     ;
 
-whereClause:
-        condition 
+optWhereClause:
+        /* empty */
     {
-        $$ = std::vector<std::shared_ptr<BinaryExpr>>{$1};
+        $$ = nullptr;
     }
-    |   whereClause AND condition
+    |   WHERE condition
+    {
+        $$ = $2;
+    }
+    ;
+
+optHaving:
+        /* empty */
+    {
+        $$ = nullptr;
+    }
+    |   HAVING condition
+    {
+        $$ = $2;
+    }
+    ;
+
+// ============================================================================
+// Expression (arithmetic + values + columns + aggregates)
+// ============================================================================
+
+expr:
+        expr_add_sub
+    ;
+
+expr_add_sub:
+        expr_mul_div
+    |   expr_add_sub '+' expr_mul_div
+    {
+        $$ = std::make_shared<ArithExpr>($1, ARITH_ADD, $3);
+    }
+    |   expr_add_sub '-' expr_mul_div
+    {
+        $$ = std::make_shared<ArithExpr>($1, ARITH_SUB, $3);
+    }
+    ;
+
+expr_mul_div:
+        expr_unary
+    |   expr_mul_div '*' expr_unary
+    {
+        $$ = std::make_shared<ArithExpr>($1, ARITH_MUL, $3);
+    }
+    |   expr_mul_div '/' expr_unary
+    {
+        $$ = std::make_shared<ArithExpr>($1, ARITH_DIV, $3);
+    }
+    |   expr_mul_div '%' expr_unary
+    {
+        $$ = std::make_shared<ArithExpr>($1, ARITH_MOD, $3);
+    }
+    ;
+
+expr_unary:
+        expr_base
+    |   '-' expr_unary
+    {
+        $$ = std::make_shared<ArithExpr>(nullptr, ARITH_NEG, $2);
+    }
+    ;
+
+expr_base:
+        value
+    {
+        $$ = std::static_pointer_cast<Expr>($1);
+    }
+    |   col
+    {
+        $$ = std::static_pointer_cast<Expr>($1);
+    }
+    |   aggExpr
+    {
+        $$ = std::static_pointer_cast<Expr>($1);
+    }
+    |   '(' expr ')'
+    {
+        $$ = $2;
+    }
+    ;
+
+// ============================================================================
+// Aggregate expressions
+// ============================================================================
+
+aggType:
+        COUNT   { $$ = AGG_COUNT; }
+    |   SUM     { $$ = AGG_SUM; }
+    |   AVG     { $$ = AGG_AVG; }
+    |   MAX     { $$ = AGG_MAX; }
+    |   MIN     { $$ = AGG_MIN; }
+    ;
+
+aggExpr:
+        aggType '(' col ')'
+    {
+        $$ = std::make_shared<AggExpr>($1, $3->col_name);
+    }
+    |   aggType '(' '*' ')'
+    {
+        if ($1 == AGG_COUNT) {
+            $$ = std::make_shared<AggExpr>(AGG_COUNT, "", true);
+        } else {
+            yyerror(&yylloc, "Only COUNT supports * argument");
+            YYERROR;
+        }
+    }
+    ;
+
+// ============================================================================
+// SELECT sub-clauses
+// ============================================================================
+
+optDistinct:
+        /* empty */     { $$ = false; }
+    |   DISTINCT        { $$ = true; }
+    ;
+
+selectItems:
+        '*'
+    {
+        $$ = std::vector<std::shared_ptr<Expr>>{};
+    }
+    |   selectItemList
+    ;
+
+selectItemList:
+        expr
+    {
+        $$ = std::vector<std::shared_ptr<Expr>>{$1};
+    }
+    |   selectItemList ',' expr
     {
         $$.push_back($3);
+    }
+    ;
+
+fromList:
+        tbName
+    {
+        $$ = std::vector<std::string>{$1};
+    }
+    |   fromList ',' tbName
+    {
+        $$.push_back($3);
+    }
+    ;
+
+optJoinList:
+        /* empty */
+    {
+        $$ = std::vector<std::shared_ptr<JoinExpr>>{};
+    }
+    |   joinList
+    {
+        $$ = $1;
+    }
+    ;
+
+joinList:
+        joinClause
+    {
+        $$ = std::vector<std::shared_ptr<JoinExpr>>{$1};
+    }
+    |   joinList joinClause
+    {
+        $$.push_back($2);
+    }
+    ;
+
+joinType:
+        INNER   { $$ = INNER_JOIN; }
+    |   LEFT    { $$ = LEFT_JOIN; }
+    |   RIGHT   { $$ = RIGHT_JOIN; }
+    |   FULL    { $$ = FULL_JOIN; }
+    ;
+
+joinClause:
+        joinType JOIN tbName ON condition
+    {
+        $$ = std::make_shared<JoinExpr>($3, $5, static_cast<JoinType>($1));
+    }
+    |   JOIN tbName ON condition
+    {
+        $$ = std::make_shared<JoinExpr>($2, $4, INNER_JOIN);
+    }
+    |   joinType JOIN tbName
+    {
+        $$ = std::make_shared<JoinExpr>($3, nullptr, static_cast<JoinType>($1));
+    }
+    |   JOIN tbName
+    {
+        $$ = std::make_shared<JoinExpr>($2, nullptr, INNER_JOIN);
+    }
+    ;
+
+optGroupBy:
+        /* empty */
+    {
+        $$ = nullptr;
+    }
+    |   GROUP BY colList
+    {
+        $$ = std::make_shared<GroupBy>($3);
+    }
+    ;
+
+optLimit:
+        /* empty */
+    {
+        $$ = nullptr;
+    }
+    |   LIMIT VALUE_INT
+    {
+        $$ = std::make_shared<LimitClause>($2);
+    }
+    |   LIMIT VALUE_INT OFFSET VALUE_INT
+    {
+        $$ = std::make_shared<LimitClause>($2, $4);
     }
     ;
 
@@ -309,17 +634,6 @@ op:
     }
     ;
 
-expr:
-        value
-    {
-        $$ = std::static_pointer_cast<Expr>($1);
-    }
-    |   col
-    {
-        $$ = std::static_pointer_cast<Expr>($1);
-    }
-    ;
-
 setClauses:
         setClause
     {
@@ -338,52 +652,29 @@ setClause:
     }
     ;
 
-selector:
-        '*'
-    {
-        $$ = {};
-    }
-    |   colList
-    ;
-
-tableList:
-        tbName
-    {
-        $$ = std::vector<std::string>{$1};
-    }
-    |   tableList ',' tbName
-    {
-        $$.push_back($3);
-    }
-    |   tableList JOIN tbName
-    {
-        $$.push_back($3);
-    }
-    ;
-
 opt_order_clause:
-    ORDER BY order_clause      
-    { 
-        $$ = $3; 
+        ORDER BY order_clause
+    {
+        $$ = $3;
     }
-    |   /* epsilon */ { /* ignore*/ }
+    |   /* empty */ { /* ignore*/ }
     ;
 
 order_clause:
-      col  opt_asc_desc 
-    { 
+        col opt_asc_desc
+    {
         $$ = std::make_shared<OrderBy>($1, $2);
     }
-    ;   
+    ;
 
 opt_asc_desc:
-    ASC          { $$ = OrderBy_ASC;     }
-    |  DESC      { $$ = OrderBy_DESC;    }
-    |       { $$ = OrderBy_DEFAULT; }
-    ;    
+        ASC     { $$ = OrderBy_ASC; }
+    |   DESC    { $$ = OrderBy_DESC; }
+    |           { $$ = OrderBy_DEFAULT; }
+    ;
 
 set_knob_type:
-    ENABLE_NESTLOOP { $$ = EnableNestLoop; }
+        ENABLE_NESTLOOP  { $$ = EnableNestLoop; }
     |   ENABLE_SORTMERGE { $$ = EnableSortMerge; }
     ;
 

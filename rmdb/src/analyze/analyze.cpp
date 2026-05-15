@@ -9,6 +9,7 @@ MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
 #include "analyze.h"
+#include <functional>
 
 /**
  * @description: 分析器，进行语义分析和查询重写，需要检查不符合语义规定的部分
@@ -45,14 +46,14 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             }
         }
         //处理where条件
-        get_clause(x->conds, query->conds);
+        get_clause(x->cond, query->conds);
         check_clause(query->tables, query->conds);
     } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
         /** TODO: */
 
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
         //处理where条件
-        get_clause(x->conds, query->conds);
+        get_clause(x->cond, query->conds);
         check_clause({x->tab_name}, query->conds);        
     } else if (auto x = std::dynamic_pointer_cast<ast::InsertStmt>(parse)) {
         // 处理insert 的values值
@@ -98,21 +99,38 @@ void Analyze::get_all_cols(const std::vector<std::string> &tab_names, std::vecto
     }
 }
 
-void Analyze::get_clause(const std::vector<std::shared_ptr<ast::BinaryExpr>> &sv_conds, std::vector<Condition> &conds) {
+void Analyze::get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector<Condition> &conds) {
     conds.clear();
-    for (auto &expr : sv_conds) {
-        Condition cond;
-        cond.lhs_col = {.tab_name = expr->lhs->tab_name, .col_name = expr->lhs->col_name};
-        cond.op = convert_sv_comp_op(expr->op);
-        if (auto rhs_val = std::dynamic_pointer_cast<ast::Value>(expr->rhs)) {
-            cond.is_rhs_val = true;
-            cond.rhs_val = convert_sv_value(rhs_val);
-        } else if (auto rhs_col = std::dynamic_pointer_cast<ast::Col>(expr->rhs)) {
-            cond.is_rhs_val = false;
-            cond.rhs_col = {.tab_name = rhs_col->tab_name, .col_name = rhs_col->col_name};
+    if (!cond) return;
+
+    std::function<void(const std::shared_ptr<ast::CondExpr>&)> traverse;
+    traverse = [&](const std::shared_ptr<ast::CondExpr> &node) {
+        if (!node) return;
+
+        if (auto logic = std::dynamic_pointer_cast<ast::LogicExpr>(node)) {
+            if (logic->op == ast::LOGIC_AND) {
+                for (auto &arg : logic->args) {
+                    traverse(arg);
+                }
+            }
+            // OR and NOT are not supported at execution level yet
+        } else if (auto binary = std::dynamic_pointer_cast<ast::BinaryExpr>(node)) {
+            Condition c;
+            c.lhs_col = {.tab_name = binary->lhs->tab_name, .col_name = binary->lhs->col_name};
+            c.op = convert_sv_comp_op(binary->op);
+            if (auto rhs_val = std::dynamic_pointer_cast<ast::Value>(binary->rhs)) {
+                c.is_rhs_val = true;
+                c.rhs_val = convert_sv_value(rhs_val);
+            } else if (auto rhs_col = std::dynamic_pointer_cast<ast::Col>(binary->rhs)) {
+                c.is_rhs_val = false;
+                c.rhs_col = {.tab_name = rhs_col->tab_name, .col_name = rhs_col->col_name};
+            }
+            conds.push_back(c);
         }
-        conds.push_back(cond);
-    }
+        // UnaryCondExpr, LikeExpr, BetweenExpr, InExpr not supported at execution level yet
+    };
+
+    traverse(cond);
 }
 
 void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds) {

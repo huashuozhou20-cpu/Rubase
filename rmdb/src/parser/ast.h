@@ -496,6 +496,8 @@ struct SelectStmt : public TreeNode {
     bool has_distinct;
     bool is_agg;
 
+    SelectStmt() : has_distinct(false), is_agg(false) {}
+
     SelectStmt(std::vector<std::shared_ptr<Col>> cols_,
                std::vector<std::string> tabs_,
                std::shared_ptr<CondExpr> cond_,

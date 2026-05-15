@@ -39,7 +39,7 @@ identifier {alpha}(_|{alpha}|{digit})*
 value_int {sign}?{digit}+
 value_float {sign}?{digit}+\.({digit}+)?
 value_string '[^']*'
-single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
+single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 
 %x STATE_COMMENT
 
@@ -79,7 +79,29 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "FLOAT" { return FLOAT; }
 "INDEX" { return INDEX; }
 "AND" { return AND; }
+"AVG" { return AVG; }
+"BETWEEN" { return BETWEEN; }
+"COUNT" { return COUNT; }
+"DISTINCT" { return DISTINCT; }
+"FULL" { return FULL; }
+"GROUP" { return GROUP; }
+"HAVING" { return HAVING; }
+"IN" { return IN; }
+"INNER" { return INNER; }
+"IS" { return IS; }
 "JOIN" {return JOIN;}
+"LEFT" { return LEFT; }
+"LIKE" { return LIKE; }
+"LIMIT" { return LIMIT; }
+"MAX" { return MAX; }
+"MIN" { return MIN; }
+"NOT" { return NOT; }
+"NULL" { return VALUE_NULL; }
+"OFFSET" { return OFFSET; }
+"ON" { return ON; }
+"OR" { return OR; }
+"RIGHT" { return RIGHT; }
+"SUM" { return SUM; }
 "EXIT" { return EXIT; }
 "HELP" { return HELP; }
 "ORDER" { return ORDER; }
