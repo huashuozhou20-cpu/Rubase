@@ -42,7 +42,10 @@ typedef enum PlanTag{
     T_NestLoop,
     T_SortMerge,    // sort merge join
     T_Sort,
-    T_Projection
+    T_Projection,
+    T_Aggregation,
+    T_Distinct,
+    T_Limit
 } PlanTag;
 
 // 查询执行计划
@@ -197,6 +200,48 @@ class SetKnobPlan : public Plan
         }
     ast::SetKnobType set_knob_type_;
     bool bool_value_;
+};
+
+class AggregationPlan : public Plan {
+   public:
+    AggregationPlan(PlanTag tag, std::shared_ptr<Plan> subplan,
+                    std::vector<std::string> group_by_cols,
+                    std::vector<ast::AggType> agg_types,
+                    std::vector<std::string> agg_cols,
+                    std::vector<Condition> having_conds)
+        : subplan_(std::move(subplan)), group_by_cols_(std::move(group_by_cols)),
+          agg_types_(std::move(agg_types)), agg_cols_(std::move(agg_cols)),
+          having_conds_(std::move(having_conds)) {
+        Plan::tag = tag;
+    }
+    ~AggregationPlan() {}
+    std::shared_ptr<Plan> subplan_;
+    std::vector<std::string> group_by_cols_;
+    std::vector<ast::AggType> agg_types_;
+    std::vector<std::string> agg_cols_;
+    std::vector<Condition> having_conds_;
+};
+
+class DistinctPlan : public Plan {
+   public:
+    DistinctPlan(PlanTag tag, std::shared_ptr<Plan> subplan)
+        : subplan_(std::move(subplan)) {
+        Plan::tag = tag;
+    }
+    ~DistinctPlan() {}
+    std::shared_ptr<Plan> subplan_;
+};
+
+class LimitPlan : public Plan {
+   public:
+    LimitPlan(PlanTag tag, std::shared_ptr<Plan> subplan, int limit, int offset)
+        : subplan_(std::move(subplan)), limit_(limit), offset_(offset) {
+        Plan::tag = tag;
+    }
+    ~LimitPlan() {}
+    std::shared_ptr<Plan> subplan_;
+    int limit_;
+    int offset_;
 };
 
 class plannerInfo{

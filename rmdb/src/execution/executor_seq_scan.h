@@ -31,9 +31,24 @@ class SeqScanExecutor : public AbstractExecutor {
 
     SmManager *sm_manager_;
 
-    // 评估单条条件是否满足
+    // 评估单条条件是否满足（支持递归 OR/NOT）
     bool eval_cond(const Condition &cond, const RmRecord &rec) {
-        // 查找左列元数据
+        // Internal node: OR
+        if (cond.op == OP_OR) {
+            for (auto &child : cond.children) {
+                if (eval_cond(child, rec)) return true;
+            }
+            return cond.children.empty();
+        }
+        // Internal node: NOT
+        if (cond.op == OP_NOT) {
+            for (auto &child : cond.children) {
+                if (eval_cond(child, rec)) return false;
+            }
+            return true;
+        }
+
+        // Leaf: find lhs column
         const ColMeta *lhs_meta = nullptr;
         for (auto &col : cols_) {
             if (col.tab_name == cond.lhs_col.tab_name && col.name == cond.lhs_col.col_name) {
@@ -45,8 +60,74 @@ class SeqScanExecutor : public AbstractExecutor {
 
         char *lhs_data = rec.data + lhs_meta->offset;
 
+        // IS NULL / IS NOT NULL
+        if (cond.op == OP_IS_NULL) {
+            return check_is_null(lhs_data, lhs_meta->type, lhs_meta->len);
+        }
+        if (cond.op == OP_IS_NOT_NULL) {
+            return !check_is_null(lhs_data, lhs_meta->type, lhs_meta->len);
+        }
+
+        // LIKE / NOT LIKE
+        if (cond.op == OP_LIKE || cond.op == OP_NOT_LIKE) {
+            std::string col_str(lhs_data, lhs_meta->len);
+            col_str = col_str.c_str();  // trim null padding
+            bool matched = like_match(col_str, cond.rhs_val.str_val);
+            return (cond.op == OP_LIKE) ? matched : !matched;
+        }
+
+        // BETWEEN / NOT BETWEEN
+        if (cond.op == OP_BETWEEN || cond.op == OP_NOT_BETWEEN) {
+            int cmp_low = 0, cmp_high = 0;
+            switch (lhs_meta->type) {
+                case TYPE_INT: {
+                    int a = *(int *)lhs_data;
+                    cmp_low = (a < cond.rhs_val.int_val) ? -1 : ((a > cond.rhs_val.int_val) ? 1 : 0);
+                    cmp_high = (a < cond.rhs_val2.int_val) ? -1 : ((a > cond.rhs_val2.int_val) ? 1 : 0);
+                    break;
+                }
+                case TYPE_FLOAT: {
+                    float a = *(float *)lhs_data;
+                    cmp_low = (a < cond.rhs_val.float_val) ? -1 : ((a > cond.rhs_val.float_val) ? 1 : 0);
+                    cmp_high = (a < cond.rhs_val2.float_val) ? -1 : ((a > cond.rhs_val2.float_val) ? 1 : 0);
+                    break;
+                }
+                case TYPE_STRING:
+                    cmp_low = memcmp(lhs_data, cond.rhs_val.raw->data, lhs_meta->len);
+                    cmp_high = memcmp(lhs_data, cond.rhs_val2.raw->data, lhs_meta->len);
+                    break;
+            }
+            bool in_range = (cmp_low >= 0 && cmp_high <= 0);
+            return (cond.op == OP_BETWEEN) ? in_range : !in_range;
+        }
+
+        // IN / NOT IN
+        if (cond.op == OP_IN || cond.op == OP_NOT_IN) {
+            bool found = false;
+            for (auto &v : cond.in_values) {
+                int cmp = 0;
+                switch (lhs_meta->type) {
+                    case TYPE_INT: {
+                        int a = *(int *)lhs_data;
+                        cmp = (a < v.int_val) ? -1 : ((a > v.int_val) ? 1 : 0);
+                        break;
+                    }
+                    case TYPE_FLOAT: {
+                        float a = *(float *)lhs_data;
+                        cmp = (a < v.float_val) ? -1 : ((a > v.float_val) ? 1 : 0);
+                        break;
+                    }
+                    case TYPE_STRING:
+                        cmp = memcmp(lhs_data, v.raw->data, lhs_meta->len);
+                        break;
+                }
+                if (cmp == 0) { found = true; break; }
+            }
+            return (cond.op == OP_IN) ? found : !found;
+        }
+
+        // Regular comparison (col op value)
         if (cond.is_rhs_val) {
-            // col op value
             int cmp = 0;
             switch (lhs_meta->type) {
                 case TYPE_INT: {
@@ -70,10 +151,10 @@ class SeqScanExecutor : public AbstractExecutor {
                 case OP_GT: return cmp > 0;
                 case OP_LE: return cmp <= 0;
                 case OP_GE: return cmp >= 0;
+                default: return true;
             }
-            return true;
         } else {
-            // col1 op col2 (same table)
+            // col1 op col2
             const ColMeta *rhs_meta = nullptr;
             for (auto &col : cols_) {
                 if (col.tab_name == cond.rhs_col.tab_name && col.name == cond.rhs_col.col_name) {
@@ -107,12 +188,13 @@ class SeqScanExecutor : public AbstractExecutor {
                 case OP_GT: return cmp > 0;
                 case OP_LE: return cmp <= 0;
                 case OP_GE: return cmp >= 0;
+                default: return true;
             }
-            return true;
         }
     }
 
-    // 检查当前记录是否满足所有条件
+
+    // 检查当前记录是否满足所有条件（AND 语义）
     bool check_all_conds(const RmRecord &rec) {
         for (auto &cond : fed_conds_) {
             if (!eval_cond(cond, rec)) return false;

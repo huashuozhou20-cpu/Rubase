@@ -61,10 +61,11 @@ public:
 
     std::shared_ptr<Query> do_analyze(std::shared_ptr<ast::TreeNode> root);
 
+    void get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector<Condition> &conds);
+
 private:
     TabCol check_column(const std::vector<ColMeta> &all_cols, TabCol target);
     void get_all_cols(const std::vector<std::string> &tab_names, std::vector<ColMeta> &all_cols);
-    void get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector<Condition> &conds);
     void check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds);
     Value convert_sv_value(const std::shared_ptr<ast::Value> &sv_val);
     CompOp convert_sv_comp_op(ast::SvCompOp op);

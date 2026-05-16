@@ -164,11 +164,46 @@ std::shared_ptr<Query> Planner::logical_optimization(std::shared_ptr<Query> quer
 std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> query, Context *context)
 {
     std::shared_ptr<Plan> plan = make_one_rel(query);
-    
-    // 其他物理优化
 
-    // 处理orderby
-    plan = generate_sort_plan(query, std::move(plan)); 
+    auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
+
+    // Aggregate / GROUP BY
+    if (query->has_agg) {
+        std::vector<ast::AggType> agg_types;
+        std::vector<std::string> agg_cols;
+        for (auto &agg : x->aggs) {
+            agg_types.push_back(agg->agg_type);
+            agg_cols.push_back(agg->col_name);
+        }
+        std::vector<std::string> group_by_cols;
+        if (x->group_by) {
+            for (auto &gb_col : x->group_by->cols) {
+                group_by_cols.push_back(gb_col->col_name);
+            }
+        }
+        std::vector<Condition> having_conds;
+        if (x->having) {
+            Analyze analyze(sm_manager_);
+            analyze.get_clause(x->having, having_conds);
+        }
+        plan = std::make_shared<AggregationPlan>(T_Aggregation, std::move(plan),
+            std::move(group_by_cols), std::move(agg_types), std::move(agg_cols),
+            std::move(having_conds));
+    }
+
+    // DISTINCT
+    if (query->has_distinct) {
+        plan = std::make_shared<DistinctPlan>(T_Distinct, std::move(plan));
+    }
+
+    // ORDER BY
+    plan = generate_sort_plan(query, std::move(plan));
+
+    // LIMIT
+    if (x->limit) {
+        plan = std::make_shared<LimitPlan>(T_Limit, std::move(plan),
+            x->limit->limit, x->limit->offset);
+    }
 
     return plan;
 }

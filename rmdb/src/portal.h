@@ -16,12 +16,16 @@ See the Mulan PSL v2 for more details. */
 #include "optimizer/plan.h"
 #include "execution/executor_abstract.h"
 #include "execution/executor_nestedloop_join.h"
+#include "execution/executor_sortmerge_join.h"
 #include "execution/executor_projection.h"
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_index_scan.h"
 #include "execution/executor_update.h"
 #include "execution/executor_insert.h"
 #include "execution/executor_delete.h"
+#include "execution/executor_aggregation.h"
+#include "execution/executor_distinct.h"
+#include "execution/executor_limit.h"
 #include "execution/execution_sort.h"
 #include "common/common.h"
 
@@ -168,13 +172,43 @@ class Portal
         } else if(auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
             std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
             std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context);
-            std::unique_ptr<AbstractExecutor> join = std::make_unique<NestedLoopJoinExecutor>(
-                                std::move(left), 
-                                std::move(right), std::move(x->conds_));
+
+            // Extract equi-join conditions (col = col)
+            std::vector<Condition> equi_conds;
+            std::vector<Condition> other_conds;
+            for (auto &c : x->conds_) {
+                if (!c.is_rhs_val && c.op == OP_EQ) {
+                    equi_conds.push_back(c);
+                } else {
+                    other_conds.push_back(c);
+                }
+            }
+
+            std::unique_ptr<AbstractExecutor> join;
+            if (!equi_conds.empty()) {
+                join = std::make_unique<SortMergeJoinExecutor>(
+                    std::move(left), std::move(right),
+                    std::move(x->conds_), std::move(equi_conds));
+            } else {
+                join = std::make_unique<NestedLoopJoinExecutor>(
+                    std::move(left), std::move(right), std::move(x->conds_));
+            }
             return join;
         } else if(auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
-            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context), 
+            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
                                             x->sel_col_, x->is_desc_);
+        } else if(auto x = std::dynamic_pointer_cast<AggregationPlan>(plan)) {
+            return std::make_unique<AggregationExecutor>(
+                convert_plan_executor(x->subplan_, context),
+                x->agg_types_, x->agg_cols_, x->group_by_cols_,
+                std::move(x->having_conds_));
+        } else if(auto x = std::dynamic_pointer_cast<DistinctPlan>(plan)) {
+            return std::make_unique<DistinctExecutor>(
+                convert_plan_executor(x->subplan_, context));
+        } else if(auto x = std::dynamic_pointer_cast<LimitPlan>(plan)) {
+            return std::make_unique<LimitExecutor>(
+                convert_plan_executor(x->subplan_, context),
+                x->limit_, x->offset_);
         }
         return nullptr;
     }

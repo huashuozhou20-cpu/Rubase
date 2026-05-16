@@ -28,17 +28,46 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> right_record_;
 
     bool eval_cond(const Condition &cond, const RmRecord &left_rec, const RmRecord &right_rec) {
-        // 找到左右两侧列在各自记录中的偏移和类型
-        const auto &lhs_col_meta = get_col_meta(cond.lhs_col);
+        // OR
+        if (cond.op == OP_OR) {
+            for (auto &child : cond.children) {
+                if (eval_cond(child, left_rec, right_rec)) return true;
+            }
+            return cond.children.empty();
+        }
+        // NOT
+        if (cond.op == OP_NOT) {
+            for (auto &child : cond.children) {
+                if (eval_cond(child, left_rec, right_rec)) return false;
+            }
+            return true;
+        }
+
+        // Find lhs column
+        ColMeta lhs_col_meta = get_col_meta(cond.lhs_col);
+        char *lhs_data = nullptr;
+        if (!lhs_col_meta.tab_name.empty()) {
+            lhs_data = (lhs_col_meta.tab_name == left_->cols()[0].tab_name)
+                           ? left_rec.data + lhs_col_meta.offset
+                           : right_rec.data + lhs_col_meta.offset;
+        }
+
+        // IS NULL / IS NOT NULL
+        if (cond.op == OP_IS_NULL) {
+            return check_is_null(lhs_data, lhs_col_meta.type, lhs_col_meta.len);
+        }
+        if (cond.op == OP_IS_NOT_NULL) {
+            return !check_is_null(lhs_data, lhs_col_meta.type, lhs_col_meta.len);
+        }
+
+        // For comparison ops, get rhs
         const auto &rhs_col_meta = get_col_meta(cond.rhs_col);
-
-        char *lhs_data = (lhs_col_meta.tab_name == left_->cols()[0].tab_name)
-                             ? left_rec.data + lhs_col_meta.offset
-                             : right_rec.data + lhs_col_meta.offset;
-
-        char *rhs_data = (rhs_col_meta.tab_name == left_->cols()[0].tab_name)
-                             ? left_rec.data + rhs_col_meta.offset
-                             : right_rec.data + rhs_col_meta.offset;
+        char *rhs_data = nullptr;
+        if (!rhs_col_meta.tab_name.empty()) {
+            rhs_data = (rhs_col_meta.tab_name == left_->cols()[0].tab_name)
+                           ? left_rec.data + rhs_col_meta.offset
+                           : right_rec.data + rhs_col_meta.offset;
+        }
 
         if (lhs_col_meta.type != rhs_col_meta.type) return false;
 
@@ -66,8 +95,8 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             case OP_GT: return cmp > 0;
             case OP_LE: return cmp <= 0;
             case OP_GE: return cmp >= 0;
+            default: return false;
         }
-        return false;
     }
 
     ColMeta get_col_meta(const TabCol &target) {

@@ -50,6 +50,8 @@ class IndexScanExecutor : public AbstractExecutor {
         len_ = cols_.back().offset + cols_.back().len;
         std::map<CompOp, CompOp> swap_op = {
             {OP_EQ, OP_EQ}, {OP_NE, OP_NE}, {OP_LT, OP_GT}, {OP_GT, OP_LT}, {OP_LE, OP_GE}, {OP_GE, OP_LE},
+            {OP_IS_NULL, OP_IS_NULL}, {OP_IS_NOT_NULL, OP_IS_NOT_NULL},
+            {OP_LIKE, OP_LIKE}, {OP_NOT_LIKE, OP_NOT_LIKE},
         };
 
         for (auto &cond : conds_) {
@@ -58,7 +60,10 @@ class IndexScanExecutor : public AbstractExecutor {
                 assert(!cond.is_rhs_val && cond.rhs_col.tab_name == tab_name_);
                 // swap lhs and rhs
                 std::swap(cond.lhs_col, cond.rhs_col);
-                cond.op = swap_op.at(cond.op);
+                auto it = swap_op.find(cond.op);
+                if (it != swap_op.end()) {
+                    cond.op = it->second;
+                }
             }
         }
         fed_conds_ = conds_;

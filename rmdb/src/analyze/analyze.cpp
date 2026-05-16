@@ -195,19 +195,47 @@ void Analyze::get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector
     conds.clear();
     if (!cond) return;
 
-    std::function<void(const std::shared_ptr<ast::CondExpr>&)> traverse;
-    traverse = [&](const std::shared_ptr<ast::CondExpr> &node) {
+    std::function<void(const std::shared_ptr<ast::CondExpr>&, std::vector<Condition>&)> traverse;
+    traverse = [&](const std::shared_ptr<ast::CondExpr> &node, std::vector<Condition> &out) {
         if (!node) return;
 
         if (auto logic = std::dynamic_pointer_cast<ast::LogicExpr>(node)) {
             if (logic->op == ast::LOGIC_AND) {
                 for (auto &arg : logic->args) {
-                    traverse(arg);
+                    traverse(arg, out);
                 }
             } else if (logic->op == ast::LOGIC_OR) {
-                throw InternalError("OR is not yet supported in execution layer");
+                Condition c;
+                c.op = OP_OR;
+                for (auto &arg : logic->args) {
+                    std::vector<Condition> child_list;
+                    traverse(arg, child_list);
+                    if (child_list.size() == 1) {
+                        c.children.push_back(std::move(child_list[0]));
+                    } else if (!child_list.empty()) {
+                        // Wrap multiple ANDed conditions as a group
+                        Condition group;
+                        group.op = OP_EQ;  // placeholder, not used
+                        group.children = std::move(child_list);
+                        c.children.push_back(std::move(group));
+                    }
+                }
+                out.push_back(c);
             } else if (logic->op == ast::LOGIC_NOT) {
-                throw InternalError("NOT is not yet supported in execution layer");
+                Condition c;
+                c.op = OP_NOT;
+                std::vector<Condition> child_list;
+                traverse(logic->args[0], child_list);
+                if (child_list.size() == 1) {
+                    c.children.push_back(std::move(child_list[0]));
+                } else {
+                    // Wrap multiple conditions
+                    Condition group;
+                    group.op = OP_EQ;
+                    group.children = std::move(child_list);
+                    c.children.push_back(std::move(group));
+                }
+                out.push_back(c);
             }
         } else if (auto binary = std::dynamic_pointer_cast<ast::BinaryExpr>(node)) {
             Condition c;
@@ -220,47 +248,116 @@ void Analyze::get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector
                 c.is_rhs_val = false;
                 c.rhs_col = {.tab_name = rhs_col->tab_name, .col_name = rhs_col->col_name};
             }
-            conds.push_back(c);
+            out.push_back(c);
         } else if (auto unary = std::dynamic_pointer_cast<ast::UnaryCondExpr>(node)) {
-            throw InternalError("IS NULL / IS NOT NULL is not yet supported in execution layer");
+            Condition c;
+            c.lhs_col = {.tab_name = unary->col->tab_name, .col_name = unary->col->col_name};
+            c.op = (unary->op == ast::SV_OP_IS_NULL) ? OP_IS_NULL : OP_IS_NOT_NULL;
+            c.is_rhs_val = false;
+            out.push_back(c);
         } else if (auto like = std::dynamic_pointer_cast<ast::LikeExpr>(node)) {
-            throw InternalError("LIKE is not yet supported in execution layer");
+            Condition c;
+            c.lhs_col = {.tab_name = like->col->tab_name, .col_name = like->col->col_name};
+            c.op = like->not_like ? OP_NOT_LIKE : OP_LIKE;
+            c.is_rhs_val = true;
+            c.rhs_val.set_str(like->pattern);
+            out.push_back(c);
         } else if (auto between = std::dynamic_pointer_cast<ast::BetweenExpr>(node)) {
-            throw InternalError("BETWEEN is not yet supported in execution layer");
+            Condition c;
+            c.lhs_col = {.tab_name = between->col->tab_name, .col_name = between->col->col_name};
+            c.op = between->not_between ? OP_NOT_BETWEEN : OP_BETWEEN;
+            c.is_rhs_val = true;
+            c.rhs_val = convert_sv_value(between->low);
+            c.rhs_val2 = convert_sv_value(between->high);
+            out.push_back(c);
         } else if (auto in_expr = std::dynamic_pointer_cast<ast::InExpr>(node)) {
-            throw InternalError("IN is not yet supported in execution layer");
+            Condition c;
+            c.lhs_col = {.tab_name = in_expr->col->tab_name, .col_name = in_expr->col->col_name};
+            c.op = in_expr->not_in ? OP_NOT_IN : OP_IN;
+            c.is_rhs_val = false;
+            for (auto &v : in_expr->values) {
+                c.in_values.push_back(convert_sv_value(v));
+            }
+            out.push_back(c);
         }
     };
 
-    traverse(cond);
+    traverse(cond, conds);
 }
 
 void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds) {
-    // auto all_cols = get_all_cols(tab_names);
     std::vector<ColMeta> all_cols;
     get_all_cols(tab_names, all_cols);
-    // Get raw values in where clause
-    for (auto &cond : conds) {
-        // Infer table name from column name
-        cond.lhs_col = check_column(all_cols, cond.lhs_col);
-        if (!cond.is_rhs_val) {
+
+    std::function<void(Condition&)> check_one;
+    check_one = [&](Condition &cond) {
+        if (cond.op == OP_OR || cond.op == OP_NOT) {
+            for (auto &child : cond.children) {
+                check_one(child);
+            }
+            return;
+        }
+        // Infer table name from column name, skip for NULL checks where lhs may be empty
+        if (!cond.lhs_col.tab_name.empty() || !cond.lhs_col.col_name.empty()) {
+            cond.lhs_col = check_column(all_cols, cond.lhs_col);
+        }
+        if (!cond.is_rhs_val && cond.op != OP_IS_NULL && cond.op != OP_IS_NOT_NULL
+            && cond.op != OP_IN && cond.op != OP_NOT_IN) {
             cond.rhs_col = check_column(all_cols, cond.rhs_col);
         }
         TabMeta &lhs_tab = sm_manager_->db_.get_table(cond.lhs_col.tab_name);
         auto lhs_col = lhs_tab.get_col(cond.lhs_col.col_name);
         ColType lhs_type = lhs_col->type;
-        ColType rhs_type;
-        if (cond.is_rhs_val) {
-            cond.rhs_val.init_raw(lhs_col->len);
-            rhs_type = cond.rhs_val.type;
-        } else {
-            TabMeta &rhs_tab = sm_manager_->db_.get_table(cond.rhs_col.tab_name);
-            auto rhs_col = rhs_tab.get_col(cond.rhs_col.col_name);
-            rhs_type = rhs_col->type;
+
+        switch (cond.op) {
+            case OP_IS_NULL:
+            case OP_IS_NOT_NULL:
+                break;  // no type check needed
+            case OP_LIKE:
+            case OP_NOT_LIKE:
+                if (lhs_type != TYPE_STRING) {
+                    throw IncompatibleTypeError(coltype2str(lhs_type), "STRING");
+                }
+                break;
+            case OP_BETWEEN:
+            case OP_NOT_BETWEEN: {
+                cond.rhs_val.init_raw(lhs_col->len);
+                cond.rhs_val2.init_raw(lhs_col->len);
+                if (lhs_type != cond.rhs_val.type) {
+                    throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(cond.rhs_val.type));
+                }
+                break;
+            }
+            case OP_IN:
+            case OP_NOT_IN: {
+                for (auto &v : cond.in_values) {
+                    v.init_raw(lhs_col->len);
+                    if (lhs_type != v.type) {
+                        throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(v.type));
+                    }
+                }
+                break;
+            }
+            default: {  // regular comparison: EQ, NE, LT, GT, LE, GE
+                if (cond.is_rhs_val) {
+                    cond.rhs_val.init_raw(lhs_col->len);
+                    if (lhs_type != cond.rhs_val.type) {
+                        throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(cond.rhs_val.type));
+                    }
+                } else {
+                    TabMeta &rhs_tab = sm_manager_->db_.get_table(cond.rhs_col.tab_name);
+                    auto rhs_col = rhs_tab.get_col(cond.rhs_col.col_name);
+                    if (lhs_type != rhs_col->type) {
+                        throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_col->type));
+                    }
+                }
+                break;
+            }
         }
-        if (lhs_type != rhs_type) {
-            throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
-        }
+    };
+
+    for (auto &cond : conds) {
+        check_one(cond);
     }
 }
 

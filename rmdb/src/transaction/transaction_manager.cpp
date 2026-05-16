@@ -105,3 +105,124 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     std::scoped_lock lock(latch_);
     TransactionManager::txn_map.erase(txn->get_transaction_id());
 }
+
+/* ===== MVCC Methods ===== */
+
+bool TransactionManager::UpdateUndoLink(Rid rid, std::optional<UndoLink> prev_link,
+                                        std::function<bool(std::optional<UndoLink>)> &&check) {
+    std::optional<VersionUndoLink> prev_version = VersionUndoLink::FromOptionalUndoLink(prev_link);
+    auto version_check = [&](std::optional<VersionUndoLink> cur) -> bool {
+        if (!check) return true;
+        if (!cur.has_value()) return check(std::nullopt);
+        return check(cur->prev_);
+    };
+    return UpdateVersionLink(rid, prev_version, version_check);
+}
+
+bool TransactionManager::UpdateVersionLink(
+    Rid rid, std::optional<VersionUndoLink> prev_version,
+    std::function<bool(std::optional<VersionUndoLink>)> &&check) {
+
+    std::unique_lock<std::shared_mutex> map_lock(version_info_mutex_);
+
+    auto it = version_info_.find(rid.page_no);
+    std::shared_ptr<PageVersionInfo> page_info;
+    if (it == version_info_.end()) {
+        page_info = std::make_shared<PageVersionInfo>();
+        version_info_[rid.page_no] = page_info;
+    } else {
+        page_info = it->second;
+    }
+    map_lock.unlock();
+
+    std::unique_lock<std::shared_mutex> page_lock(page_info->mutex_);
+
+    auto slot_it = page_info->prev_version_.find(rid.slot_no);
+    std::optional<VersionUndoLink> current;
+    if (slot_it != page_info->prev_version_.end()) {
+        current = slot_it->second;
+    }
+
+    if (check && !check(current)) {
+        return false;
+    }
+
+    if (prev_version.has_value()) {
+        page_info->prev_version_[rid.slot_no] = *prev_version;
+    } else {
+        page_info->prev_version_.erase(rid.slot_no);
+    }
+    return true;
+}
+
+std::optional<UndoLink> TransactionManager::GetUndoLink(Rid rid) {
+    auto version_link = GetVersionLink(rid);
+    if (version_link.has_value()) {
+        return version_link->prev_;
+    }
+    return std::nullopt;
+}
+
+std::optional<VersionUndoLink> TransactionManager::GetVersionLink(Rid rid) {
+    std::shared_lock<std::shared_mutex> map_lock(version_info_mutex_);
+
+    auto it = version_info_.find(rid.page_no);
+    if (it == version_info_.end()) {
+        return std::nullopt;
+    }
+    auto page_info = it->second;
+    map_lock.unlock();
+
+    std::shared_lock<std::shared_mutex> page_lock(page_info->mutex_);
+    auto slot_it = page_info->prev_version_.find(rid.slot_no);
+    if (slot_it != page_info->prev_version_.end()) {
+        return slot_it->second;
+    }
+    return std::nullopt;
+}
+
+std::optional<UndoLog> TransactionManager::GetUndoLogOptional(UndoLink link) {
+    if (!link.IsValid()) {
+        return std::nullopt;
+    }
+    std::scoped_lock lock(latch_);
+    auto it = TransactionManager::txn_map.find(link.prev_txn_);
+    if (it == TransactionManager::txn_map.end()) {
+        return std::nullopt;
+    }
+    return it->second->GetUndoLog(link.prev_log_idx_);
+}
+
+UndoLog TransactionManager::GetUndoLog(UndoLink link) {
+    auto result = GetUndoLogOptional(link);
+    if (!result.has_value()) {
+        throw InternalError("GetUndoLog: transaction " + std::to_string(link.prev_txn_) +
+                            " not found for undo log index " + std::to_string(link.prev_log_idx_));
+    }
+    return *result;
+}
+
+timestamp_t TransactionManager::GetWatermark() {
+    return running_txns_.GetWatermark();
+}
+
+void TransactionManager::GarbageCollection() {
+    timestamp_t watermark = GetWatermark();
+    if (watermark == INVALID_TS) return;
+
+    std::scoped_lock lock(latch_);
+
+    std::vector<txn_id_t> to_erase;
+    for (auto& [txn_id, txn] : TransactionManager::txn_map) {
+        auto state = txn->get_state();
+        if (state == TransactionState::COMMITTED || state == TransactionState::ABORTED) {
+            if (txn->get_commit_ts() < watermark) {
+                to_erase.push_back(txn_id);
+            }
+        }
+    }
+
+    for (auto txn_id : to_erase) {
+        TransactionManager::txn_map.erase(txn_id);
+    }
+}
