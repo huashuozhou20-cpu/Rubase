@@ -27,8 +27,98 @@ class SeqScanExecutor : public AbstractExecutor {
 
     Rid rid_;
     std::unique_ptr<RecScan> scan_;     // table_iterator
+    bool is_end_;
 
     SmManager *sm_manager_;
+
+    // 评估单条条件是否满足
+    bool eval_cond(const Condition &cond, const RmRecord &rec) {
+        // 查找左列元数据
+        const ColMeta *lhs_meta = nullptr;
+        for (auto &col : cols_) {
+            if (col.tab_name == cond.lhs_col.tab_name && col.name == cond.lhs_col.col_name) {
+                lhs_meta = &col;
+                break;
+            }
+        }
+        if (!lhs_meta) return true;
+
+        char *lhs_data = rec.data + lhs_meta->offset;
+
+        if (cond.is_rhs_val) {
+            // col op value
+            int cmp = 0;
+            switch (lhs_meta->type) {
+                case TYPE_INT: {
+                    int a = *(int *)lhs_data, b = cond.rhs_val.int_val;
+                    cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+                    break;
+                }
+                case TYPE_FLOAT: {
+                    float a = *(float *)lhs_data, b = cond.rhs_val.float_val;
+                    cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+                    break;
+                }
+                case TYPE_STRING:
+                    cmp = memcmp(lhs_data, cond.rhs_val.raw->data, lhs_meta->len);
+                    break;
+            }
+            switch (cond.op) {
+                case OP_EQ: return cmp == 0;
+                case OP_NE: return cmp != 0;
+                case OP_LT: return cmp < 0;
+                case OP_GT: return cmp > 0;
+                case OP_LE: return cmp <= 0;
+                case OP_GE: return cmp >= 0;
+            }
+            return true;
+        } else {
+            // col1 op col2 (same table)
+            const ColMeta *rhs_meta = nullptr;
+            for (auto &col : cols_) {
+                if (col.tab_name == cond.rhs_col.tab_name && col.name == cond.rhs_col.col_name) {
+                    rhs_meta = &col;
+                    break;
+                }
+            }
+            if (!rhs_meta) return true;
+
+            char *rhs_data = rec.data + rhs_meta->offset;
+            int cmp = 0;
+            switch (lhs_meta->type) {
+                case TYPE_INT: {
+                    int a = *(int *)lhs_data, b = *(int *)rhs_data;
+                    cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+                    break;
+                }
+                case TYPE_FLOAT: {
+                    float a = *(float *)lhs_data, b = *(float *)rhs_data;
+                    cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+                    break;
+                }
+                case TYPE_STRING:
+                    cmp = memcmp(lhs_data, rhs_data, lhs_meta->len);
+                    break;
+            }
+            switch (cond.op) {
+                case OP_EQ: return cmp == 0;
+                case OP_NE: return cmp != 0;
+                case OP_LT: return cmp < 0;
+                case OP_GT: return cmp > 0;
+                case OP_LE: return cmp <= 0;
+                case OP_GE: return cmp >= 0;
+            }
+            return true;
+        }
+    }
+
+    // 检查当前记录是否满足所有条件
+    bool check_all_conds(const RmRecord &rec) {
+        for (auto &cond : fed_conds_) {
+            if (!eval_cond(cond, rec)) return false;
+        }
+        return true;
+    }
 
    public:
     SeqScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, Context *context) {
@@ -41,20 +131,39 @@ class SeqScanExecutor : public AbstractExecutor {
         len_ = cols_.back().offset + cols_.back().len;
 
         context_ = context;
-
         fed_conds_ = conds_;
+        is_end_ = true;
     }
 
     void beginTuple() override {
-        
+        scan_ = std::make_unique<RmScan>(fh_);
+        is_end_ = false;
+        nextTuple();
     }
 
     void nextTuple() override {
-        
+        while (true) {
+            scan_->next();
+            if (scan_->is_end()) {
+                is_end_ = true;
+                return;
+            }
+            rid_ = scan_->rid();
+            // 读取记录并检查条件
+            auto rec = fh_->get_record(rid_, context_);
+            if (check_all_conds(*rec)) return;
+        }
     }
 
+    bool is_end() const override { return is_end_; }
+
+    size_t tupleLen() const override { return len_; }
+
+    const std::vector<ColMeta> &cols() const override { return cols_; }
+
     std::unique_ptr<RmRecord> Next() override {
-        return nullptr;
+        if (is_end_) return nullptr;
+        return fh_->get_record(rid_, context_);
     }
 
     Rid &rid() override { return rid_; }

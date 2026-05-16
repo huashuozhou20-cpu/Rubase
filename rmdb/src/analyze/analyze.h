@@ -20,15 +20,23 @@ See the Mulan PSL v2 for more details. */
 #include "system/sm.h"
 #include "common/common.h"
 
+// 连接树中的一项，描述一个表如何加入查询
+struct JoinItem {
+    std::string tab_name;                // 表名
+    JoinType join_type;                  // 连接类型（INNER / LEFT / RIGHT / FULL / CROSS）
+    std::vector<Condition> conds;        // ON 连接条件
+};
+
 class Query{
     public:
     std::shared_ptr<ast::TreeNode> parse;
-    // TODO jointree
-    // where条件
+    // 连接树：按join顺序排列，第一项为驱动表
+    std::vector<JoinItem> join_tree;
+    // where条件（已从连接条件中分离）
     std::vector<Condition> conds;
     // 投影列
     std::vector<TabCol> cols;
-    // 表名
+    // 表名（所有参与查询的表）
     std::vector<std::string> tables;
     // update 的set 值
     std::vector<SetClause> set_clauses;

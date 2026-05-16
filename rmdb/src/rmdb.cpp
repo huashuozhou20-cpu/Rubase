@@ -66,6 +66,18 @@ void SetTransaction(txn_id_t *txn_id, Context *context) {
     }
 }
 
+// 将格式化的结果发送给客户端
+static int send_result_to_client(int fd, const char *data, int len) {
+    if (len <= 0) return 0;
+    int total = 0;
+    while (total < len) {
+        int sent = write(fd, data + total, len - total);
+        if (sent <= 0) return -1;
+        total += sent;
+    }
+    return total;
+}
+
 void *client_handler(void *sock_fd) {
     int fd = *((int *)sock_fd);
     pthread_mutex_unlock(sockfd_mutex);
@@ -137,11 +149,10 @@ void *client_handler(void *sock_fd) {
                     portal->run(portalStmt, ql_manager.get(), &txn_id, context);
                     portal->drop();
                 } catch (TransactionAbortException &e) {
-                    // 事务需要回滚，需要把abort信息返回给客户端并写入output.txt文件中
-                    std::string str = "abort\n";
-                    memcpy(data_send, str.c_str(), str.length());
-                    data_send[str.length()] = '\0';
-                    offset = str.length();
+                    // 事务需要回滚，格式化abort结果返回给客户端
+                    Result result{Result::ABORT, "abort\n"};
+                    memcpy(data_send, result.msg.c_str(), result.msg.length());
+                    offset = result.msg.length();
 
                     // 回滚事务
                     txn_manager->abort(context->txn_, log_manager.get());
@@ -149,20 +160,18 @@ void *client_handler(void *sock_fd) {
 
                     std::fstream outfile;
                     outfile.open("output.txt", std::ios::out | std::ios::app);
-                    outfile << str;
+                    outfile << result.msg;
                     outfile.close();
                 } catch (RMDBError &e) {
-                    // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
+                    // 格式化错误结果返回给客户端
                     std::cerr << e.what() << std::endl;
-
-                    memcpy(data_send, e.what(), e.get_msg_len());
-                    data_send[e.get_msg_len()] = '\n';
-                    data_send[e.get_msg_len() + 1] = '\0';
-                    offset = e.get_msg_len() + 1;
+                    Result result{Result::FAILURE, std::string(e.what()) + "\n"};
+                    memcpy(data_send, result.msg.c_str(), result.msg.length());
+                    offset = result.msg.length();
 
                     // 将报错信息写入output.txt
                     std::fstream outfile;
-                    outfile.open("output.txt",std::ios::out | std::ios::app);
+                    outfile.open("output.txt", std::ios::out | std::ios::app);
                     outfile << "failure\n";
                     outfile.close();
                 }
@@ -172,9 +181,8 @@ void *client_handler(void *sock_fd) {
             yy_delete_buffer(buf);
             pthread_mutex_unlock(buffer_mutex);
         }
-        // future TODO: 格式化 sql_handler.result, 传给客户端
-        // send result with fixed format, use protobuf in the future
-        if (write(fd, data_send, offset + 1) == -1) {
+        // 将格式化结果发送给客户端
+        if (send_result_to_client(fd, data_send, offset) < 0) {
             break;
         }
         // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务

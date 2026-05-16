@@ -57,13 +57,33 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         get_clause(x->cond, query->conds);
         check_clause(query->tables, query->conds);
 
-        // 处理 JOIN ON 条件
-        for (auto &join : x->joins) {
-            if (join->cond) {
-                std::vector<Condition> join_conds;
-                get_clause(join->cond, join_conds);
-                check_clause(query->tables, join_conds);
-                query->conds.insert(query->conds.end(), join_conds.begin(), join_conds.end());
+        // 构建连接树（JoinTree）
+        query->join_tree.clear();
+        if (!query->tables.empty()) {
+            // 第一个表为驱动表
+            query->join_tree.push_back({query->tables[0], INNER_JOIN, {}});
+
+            // 后续表根据 JOIN 语法确定连接类型
+            for (size_t i = 1; i < query->tables.size(); i++) {
+                JoinItem item;
+                item.tab_name = query->tables[i];
+                item.join_type = INNER_JOIN;  // 默认：逗号分隔的隐式交叉连接
+
+                // 查找对应的显式 JOIN 表达式
+                for (auto &join : x->joins) {
+                    if (join->tab_name == query->tables[i]) {
+                        item.join_type = join->type;
+                        if (join->cond) {
+                            get_clause(join->cond, item.conds);
+                            check_clause(query->tables, item.conds);
+                            // ON条件同时加入conds，供logical_optimization分类使用
+                            query->conds.insert(query->conds.end(),
+                                              item.conds.begin(), item.conds.end());
+                        }
+                        break;
+                    }
+                }
+                query->join_tree.push_back(item);
             }
         }
 

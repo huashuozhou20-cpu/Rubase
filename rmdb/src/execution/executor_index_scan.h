@@ -31,19 +31,19 @@ class IndexScanExecutor : public AbstractExecutor {
 
     Rid rid_;
     std::unique_ptr<RecScan> scan_;
+    bool is_end_;
 
     SmManager *sm_manager_;
 
    public:
-    IndexScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, std::vector<std::string> index_col_names,
-                    Context *context) {
+    IndexScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds,
+                      std::vector<std::string> index_col_names, Context *context) {
         sm_manager_ = sm_manager;
         context_ = context;
         tab_name_ = std::move(tab_name);
         tab_ = sm_manager_->db_.get_table(tab_name_);
         conds_ = std::move(conds);
-        // index_no_ = index_no;
-        index_col_names_ = index_col_names; 
+        index_col_names_ = index_col_names;
         index_meta_ = *(tab_.get_index_meta(index_col_names_));
         fh_ = sm_manager_->fhs_.at(tab_name_).get();
         cols_ = tab_.cols;
@@ -62,18 +62,58 @@ class IndexScanExecutor : public AbstractExecutor {
             }
         }
         fed_conds_ = conds_;
+        is_end_ = true;
     }
 
     void beginTuple() override {
-        
+        auto ih = sm_manager_->ihs_
+                      .at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols))
+                      .get();
+
+        // 从等值条件中提取key，构造查找范围
+        char *key = new char[index_meta_.col_tot_len];
+        memset(key, 0, index_meta_.col_tot_len);
+        int offset = 0;
+        for (size_t i = 0; i < index_meta_.col_num; i++) {
+            // 查找匹配当前索引列的等值条件
+            for (auto &cond : fed_conds_) {
+                if (cond.is_rhs_val && cond.op == OP_EQ &&
+                    cond.lhs_col.col_name == index_meta_.cols[i].name &&
+                    cond.lhs_col.tab_name == tab_name_) {
+                    cond.rhs_val.init_raw(index_meta_.cols[i].len);
+                    memcpy(key + offset, cond.rhs_val.raw->data, index_meta_.cols[i].len);
+                    break;
+                }
+            }
+            offset += index_meta_.cols[i].len;
+        }
+
+        Iid lower = ih->lower_bound(key);
+        Iid upper = ih->upper_bound(key);
+        scan_ = std::make_unique<IxScan>(ih, lower, upper, sm_manager_->get_bpm());
+        delete[] key;
+        is_end_ = false;
+        nextTuple();
     }
 
     void nextTuple() override {
-        
+        scan_->next();
+        if (scan_->is_end()) {
+            is_end_ = true;
+            return;
+        }
+        rid_ = scan_->rid();
     }
 
+    bool is_end() const override { return is_end_; }
+
+    size_t tupleLen() const override { return len_; }
+
+    const std::vector<ColMeta> &cols() const override { return cols_; }
+
     std::unique_ptr<RmRecord> Next() override {
-        return nullptr;
+        if (is_end_) return nullptr;
+        return fh_->get_record(rid_, context_);
     }
 
     Rid &rid() override { return rid_; }

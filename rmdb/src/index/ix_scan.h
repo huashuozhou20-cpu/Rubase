@@ -17,16 +17,23 @@ See the Mulan PSL v2 for more details. */
 
 // 用于遍历叶子结点
 // 用于直接遍历叶子结点，而不用findleafpage来得到叶子结点
-// TODO：对page遍历时，要加上读锁
 class IxScan : public RecScan {
     const IxIndexHandle *ih_;
-    Iid iid_;  // 初始为lower（用于遍历的指针）
-    Iid end_;  // 初始为upper
+    Iid iid_;            // 初始为lower（用于遍历的指针）
+    Iid end_;            // 初始为upper
     BufferPoolManager *bpm_;
+    IxNodeHandle *curr_node_;  // 当前持有的页面读锁
 
    public:
     IxScan(const IxIndexHandle *ih, const Iid &lower, const Iid &upper, BufferPoolManager *bpm)
-        : ih_(ih), iid_(lower), end_(upper), bpm_(bpm) {}
+        : ih_(ih), iid_(lower), end_(upper), bpm_(bpm), curr_node_(nullptr) {}
+
+    ~IxScan() override {
+        if (curr_node_ != nullptr) {
+            bpm_->unpin_page(curr_node_->get_page_id(), false);
+            delete curr_node_;
+        }
+    }
 
     void next() override;
 

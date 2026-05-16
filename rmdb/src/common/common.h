@@ -86,3 +86,10 @@ struct SetClause {
     TabCol lhs;
     Value rhs;
 };
+
+// 查询结果，用于格式化返回给客户端
+struct Result {
+    enum Status { SUCCESS = 0, ABORT = 1, FAILURE = 2 };
+    Status status;
+    std::string msg;  // 结果数据或错误信息
+};
