@@ -25,7 +25,8 @@ void IxScan::next() {
 
     // 获取并固定当前页面（读锁）
     if (curr_node_ == nullptr) {
-        curr_node_ = ih_->fetch_node(iid_.page_no);
+        auto guard = ih_->fetch_node(iid_.page_no);
+        curr_node_ = guard.release();
     }
 
     assert(curr_node_->is_leaf_page());

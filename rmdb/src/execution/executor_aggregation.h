@@ -57,7 +57,13 @@ class AggregationExecutor : public AbstractExecutor {
 
     ColMeta find_col(const std::string &col_name) {
         for (auto &col : child_->cols()) {
-            if (col.name == col_name) return col;
+            if (col.name == col_name || col.tab_name + "." + col.name == col_name) return col;
+        }
+        // If col_name has table prefix, strip it and try again
+        auto dot_pos = col_name.find('.');
+        std::string bare_name = (dot_pos != std::string::npos) ? col_name.substr(dot_pos + 1) : col_name;
+        for (auto &col : child_->cols()) {
+            if (col.name == bare_name) return col;
         }
         return ColMeta{};
     }
@@ -209,30 +215,33 @@ class AggregationExecutor : public AbstractExecutor {
         result_pos_ = 0;
 
         if (group_by_cols_.empty()) {
-            // No GROUP BY: single aggregate row (or empty result for COUNT when no rows)
-            AggregateState state;
+            // No GROUP BY: single aggregate row
+            std::vector<AggregateState> states(agg_types_.size());
+
             child_->beginTuple();
-            if (!child_->is_end()) {
-                auto rec = child_->Next();
-                ColMeta agg_meta = find_col(agg_cols_[0]);
-                char *agg_data = rec->data + agg_meta.offset;
-                accumulate(state, agg_data, agg_meta.type);
-            }
             while (!child_->is_end()) {
-                child_->nextTuple();
-                if (child_->is_end()) break;
                 auto rec = child_->Next();
-                ColMeta agg_meta = find_col(agg_cols_[0]);
-                char *agg_data = rec->data + agg_meta.offset;
-                accumulate(state, agg_data, agg_meta.type);
+                for (size_t i = 0; i < agg_types_.size(); i++) {
+                    if (agg_cols_[i].empty()) {
+                        // COUNT(*) or similar: just count, no data access needed
+                        states[i].count++;
+                        states[i].has_value = true;
+                    } else {
+                        ColMeta agg_meta = find_col(agg_cols_[i]);
+                        char *agg_data = rec->data + agg_meta.offset;
+                        accumulate(states[i], agg_data, agg_meta.type);
+                    }
+                }
+                child_->nextTuple();
             }
 
             auto rec = std::make_unique<RmRecord>(len_);
-            if (state.has_value || agg_types_[0] == ast::AGG_COUNT) {
-                Value v = compute_value(state, agg_types_[0]);
-                memcpy(rec->data, v.raw->data, cols_[0].len);
-            } else {
-                memset(rec->data, 0, len_);
+            memset(rec->data, 0, len_);
+            for (size_t i = 0; i < agg_types_.size(); i++) {
+                if (states[i].has_value || agg_types_[i] == ast::AGG_COUNT) {
+                    Value v = compute_value(states[i], agg_types_[i]);
+                    memcpy(rec->data + cols_[i].offset, v.raw->data, cols_[i].len);
+                }
             }
             if (check_having(*rec)) {
                 results_.push_back(std::move(rec));

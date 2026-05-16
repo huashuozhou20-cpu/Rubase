@@ -38,6 +38,7 @@ struct Value {
         float float_val;  // float value
     };
     std::string str_val;  // string value
+    bool is_null_ = false;
 
     std::shared_ptr<RmRecord> raw;  // raw record buffer
 
@@ -56,7 +57,19 @@ struct Value {
         str_val = std::move(str_val_);
     }
 
+    void set_null() {
+        is_null_ = true;
+        type = TYPE_INT;  // placeholder, will be overwritten by actual column type
+        int_val = NULL_INT;
+    }
+
     void init_raw(int len) {
+        if (is_null_) {
+            // Create NULL sentinel for the actual column type at the given length
+            raw = std::make_shared<RmRecord>(len);
+            memset(raw->data, 0, len);
+            return;
+        }
         assert(raw == nullptr);
         raw = std::make_shared<RmRecord>(len);
         if (type == TYPE_INT) {

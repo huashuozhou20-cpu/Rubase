@@ -48,7 +48,7 @@ class DeleteExecutor : public AbstractExecutor {
                               .get();
                 char *key = new char[index.col_tot_len];
                 int offset = 0;
-                for (size_t j = 0; j < index.col_num; j++) {
+                for (size_t j = 0; j < static_cast<size_t>(index.col_num); j++) {
                     memcpy(key + offset, rec->data + index.cols[j].offset, index.cols[j].len);
                     offset += index.cols[j].len;
                 }

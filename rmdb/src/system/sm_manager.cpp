@@ -111,9 +111,6 @@ void SmManager::open_db(const std::string& db_name) {
             }
         }
     }
-    if (chdir("..") < 0) {
-        throw UnixError();
-    }
 }
 
 /**
@@ -141,6 +138,10 @@ void SmManager::close_db() {
     fhs_.clear();
     // 刷新元数据到磁盘
     flush_meta();
+    // 返回上级目录
+    if (chdir("..") < 0) {
+        throw UnixError();
+    }
 }
 
 /**
@@ -270,12 +271,33 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
     }
     // 调用 IxManager 创建索引文件
     ix_manager_->create_index(tab_name, index_cols);
-    // 打开新索引
-    auto ix_name = ix_manager_->get_index_name(tab_name, index_cols);
-    ihs_.emplace(ix_name, ix_manager_->open_index(tab_name, index_cols));
-    // 更新表元数据
+    // 计算索引key总长度
     int col_tot_len = 0;
     for (auto &col : index_cols) col_tot_len += col.len;
+
+    // 打开新索引
+    auto ix_name = ix_manager_->get_index_name(tab_name, index_cols);
+    auto ih = ix_manager_->open_index(tab_name, index_cols);
+    auto ih_raw = ih.get();
+    ihs_.emplace(ix_name, std::move(ih));
+
+    // 扫描已有数据并插入索引
+    auto fh = fhs_.at(tab_name).get();
+    RmScan scan(fh);
+    while (!scan.is_end()) {
+        auto rec = fh->get_record(scan.rid(), context);
+        char *key = new char[col_tot_len];
+        int offset = 0;
+        for (auto &col : index_cols) {
+            memcpy(key + offset, rec->data + col.offset, col.len);
+            offset += col.len;
+        }
+        ih_raw->insert_entry(key, scan.rid(), context->txn_);
+        delete[] key;
+        scan.next();
+    }
+
+    // 更新表元数据
     IndexMeta index_meta;
     index_meta.tab_name = tab_name;
     index_meta.col_num = static_cast<int>(index_cols.size());
@@ -325,7 +347,6 @@ void SmManager::drop_index(const std::string& tab_name, const std::vector<std::s
  * @param {Context*} context
  */
 void SmManager::drop_index(const std::string& tab_name, const std::vector<ColMeta>& cols, Context* context) {
-    TabMeta &tab = db_.get_table(tab_name);
     // 从ColMeta提取列名
     std::vector<std::string> col_names;
     for (auto &col : cols) col_names.push_back(col.name);

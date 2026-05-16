@@ -95,9 +95,10 @@ bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, 
 
     // Check compatibility
     if (!is_compatible(lock_mode, queue.group_lock_mode_)) {
-        // Check for deadlock before denying
-        if (would_deadlock(txn->get_transaction_id(), queue)) {
-            throw TransactionAbortException(txn->get_transaction_id(),
+        // Check for deadlock and select optimal victim
+        txn_id_t victim = find_deadlock_victim(txn->get_transaction_id(), queue);
+        if (victim != INVALID_TXN_ID) {
+            throw TransactionAbortException(victim,
                                             AbortReason::DEADLOCK_PREVENTION);
         }
         return false;
@@ -166,7 +167,7 @@ bool LockManager::lock_IX_on_table(Transaction* txn, int tab_fd) {
 /**
  * @description: 释放锁
  */
-bool LockManager::would_deadlock(txn_id_t requestor, const LockRequestQueue& queue) {
+txn_id_t LockManager::find_deadlock_victim(txn_id_t requestor, const LockRequestQueue& queue) {
     // Collect all txn_ids that hold locks on this item (blocking the requestor)
     std::unordered_set<txn_id_t> blockers;
     for (auto& req : queue.request_queue_) {
@@ -174,10 +175,9 @@ bool LockManager::would_deadlock(txn_id_t requestor, const LockRequestQueue& que
             blockers.insert(req.txn_id_);
         }
     }
-    if (blockers.empty()) return false;
+    if (blockers.empty()) return INVALID_TXN_ID;
 
-    // Build wait-for graph from all lock queues
-    // Edge: waiter -> holder
+    // Build wait-for graph from all lock queues. Edge: waiter -> holder.
     std::unordered_map<txn_id_t, std::unordered_set<txn_id_t>> wait_for;
     for (auto& [id, q] : lock_table_) {
         std::unordered_set<txn_id_t> held_by;
@@ -194,18 +194,28 @@ bool LockManager::would_deadlock(txn_id_t requestor, const LockRequestQueue& que
             }
         }
     }
-    // Also consider: if requestor were waiting, would there be a cycle?
+    // Add temporary edges: if requestor were waiting, it would point to each blocker
     for (auto blocker : blockers) {
         wait_for[requestor].insert(blocker);
     }
 
-    // DFS cycle detection
+    // DFS cycle detection. Collect all transactions in the cycle.
     std::unordered_set<txn_id_t> visited, rec_stack;
+    std::vector<txn_id_t> cycle_members;
+
     std::function<bool(txn_id_t)> dfs = [&](txn_id_t u) -> bool {
         visited.insert(u);
         rec_stack.insert(u);
         for (auto v : wait_for[u]) {
-            if (rec_stack.count(v)) return true;
+            if (rec_stack.count(v)) {
+                // Cycle found: v is already in the recursion stack.
+                // Collect all transactions currently in the rec_stack (on the path from v to u).
+                cycle_members.push_back(v);
+                for (auto txn : rec_stack) {
+                    if (txn != v) cycle_members.push_back(txn);
+                }
+                return true;
+            }
             if (!visited.count(v) && dfs(v)) return true;
         }
         rec_stack.erase(u);
@@ -216,7 +226,15 @@ bool LockManager::would_deadlock(txn_id_t requestor, const LockRequestQueue& que
     // Remove temporary edges
     wait_for[requestor].clear();
 
-    return has_cycle;
+    if (!has_cycle) return INVALID_TXN_ID;
+
+    // Victim selection: choose the youngest transaction (highest txn_id) in the cycle.
+    // Younger transactions have done less work, so aborting them is cheaper.
+    txn_id_t victim = INVALID_TXN_ID;
+    for (auto txn : cycle_members) {
+        if (txn > victim) victim = txn;
+    }
+    return victim;
 }
 
 bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {

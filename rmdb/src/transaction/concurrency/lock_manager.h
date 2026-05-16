@@ -70,6 +70,7 @@ private:
     bool is_compatible(LockMode request_mode, GroupLockMode group_mode);
     GroupLockMode lock_mode_to_group_mode(LockMode mode);
 
-    // Deadlock detection: check if request creates a cycle in wait-for graph
-    bool would_deadlock(txn_id_t requestor, const LockRequestQueue& queue);
+    // Deadlock detection: find the best victim in the wait-for graph cycle.
+    // Returns INVALID_TXN_ID if no cycle, otherwise returns the victim's txn_id.
+    txn_id_t find_deadlock_victim(txn_id_t requestor, const LockRequestQueue& queue);
 };

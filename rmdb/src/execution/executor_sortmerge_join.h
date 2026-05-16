@@ -25,6 +25,7 @@ class SortMergeJoinExecutor : public AbstractExecutor {
     size_t len_;
     std::vector<ColMeta> cols_;
 
+    JoinType join_type_;
     std::vector<Condition> conds_;
     std::vector<Condition> equi_conds_;
     bool is_end_;
@@ -32,6 +33,14 @@ class SortMergeJoinExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> right_record_;
     std::vector<RmRecord> right_matches_;  // buffered matches for current left key
     size_t right_match_pos_;
+    bool left_has_group_match_;    // current left key group had at least one full match
+    bool null_pad_output_;         // emitting left + NULL (no match case)
+    std::unique_ptr<RmRecord> null_right_;
+    // FULL_JOIN: track right rows that had matches, emit unmatched after left exhausted
+    std::vector<bool> right_row_matched_;
+    size_t right_row_count_;
+    bool left_exhausted_;
+    std::unique_ptr<RmRecord> null_left_;
 
     ColMeta get_col_meta(const TabCol &target) {
         for (auto &col : cols_) {
@@ -160,12 +169,29 @@ class SortMergeJoinExecutor : public AbstractExecutor {
     bool advance_to_next_match() {
         while (true) {
             if (right_match_pos_ < right_matches_.size()) {
-                // Still have buffered matches for current left key
                 right_record_ = std::make_unique<RmRecord>(right_matches_[right_match_pos_++]);
+                if (check_all_conds()) {
+                    left_has_group_match_ = true;
+                    null_pad_output_ = false;
+                    return true;
+                }
+                continue;
+            }
+
+            // All buffered matches for current left key exhausted.
+            // For outer join: if no match found for this left key group, emit NULL-padded left.
+            if (!left_has_group_match_ && right_matches_.empty() &&
+                (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN)) {
+                if (!null_right_)
+                    null_right_ = std::make_unique<RmRecord>(right_->tupleLen());
+                memset(null_right_->data, 0, right_->tupleLen());
+                null_pad_output_ = true;
                 return true;
             }
+
             right_matches_.clear();
             right_match_pos_ = 0;
+            left_has_group_match_ = false;
 
             // Advance left
             left_->nextTuple();
@@ -179,7 +205,6 @@ class SortMergeJoinExecutor : public AbstractExecutor {
                 auto rec = right_->Next();
                 int cmp = compare_keys(*left_record_, *rec);
                 if (cmp < 0) {
-                    // Right key > left key, need to advance left
                     break;
                 }
                 right_matches_.push_back(*rec);
@@ -195,13 +220,56 @@ class SortMergeJoinExecutor : public AbstractExecutor {
             right_matches_.erase(right_matches_.begin(), right_matches_.begin() + i);
 
             if (!right_matches_.empty()) {
-                right_record_ = std::make_unique<RmRecord>(right_matches_[0]);
-                right_match_pos_ = 1;
+                // Check buffered matches for any that satisfy all conditions
+                for (size_t j = 0; j < right_matches_.size(); j++) {
+                    right_record_ = std::make_unique<RmRecord>(right_matches_[j]);
+                    if (check_all_conds()) {
+                        left_has_group_match_ = true;
+                        null_pad_output_ = false;
+                        right_match_pos_ = j + 1;
+                        return true;
+                    }
+                }
+                // All key-matching rows fail non-equi conditions.
+                // For outer join, emit NULL-padded left.
+                if (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN) {
+                    if (!null_right_)
+                        null_right_ = std::make_unique<RmRecord>(right_->tupleLen());
+                    memset(null_right_->data, 0, right_->tupleLen());
+                    null_pad_output_ = true;
+                    return true;
+                }
+                // For INNER_JOIN, continue to next left row
+                continue;
+            }
+
+            // No key match for this left row.
+            // For outer join, emit NULL-padded left.
+            if (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN) {
+                if (!null_right_)
+                    null_right_ = std::make_unique<RmRecord>(right_->tupleLen());
+                memset(null_right_->data, 0, right_->tupleLen());
+                null_pad_output_ = true;
                 return true;
             }
-            // Right exhausted, rewind for next left tuple
+
+            // For INNER_JOIN: rewind right for next left tuple
             right_->beginTuple();
             if (right_->is_end()) return false;
+        }
+    }
+
+    // After main loop: emit unmatched right rows for FULL_JOIN.
+    // Rescan right, for each row check if it had any left match.
+    bool find_unmatched_right() {
+        while (true) {
+            right_->nextTuple();
+            if (right_->is_end()) return false;
+            right_record_ = right_->Next();
+            right_row_count_++;
+            if (right_row_count_ >= right_row_matched_.size() || !right_row_matched_[right_row_count_]) {
+                return true;
+            }
         }
     }
 
@@ -209,8 +277,11 @@ class SortMergeJoinExecutor : public AbstractExecutor {
     SortMergeJoinExecutor(std::unique_ptr<AbstractExecutor> left,
                           std::unique_ptr<AbstractExecutor> right,
                           std::vector<Condition> conds,
-                          std::vector<Condition> equi_conds)
-        : conds_(std::move(conds)), equi_conds_(std::move(equi_conds)) {
+                          std::vector<Condition> equi_conds,
+                          JoinType join_type = INNER_JOIN)
+        : join_type_(join_type), conds_(std::move(conds)), equi_conds_(std::move(equi_conds)),
+          left_has_group_match_(false), null_pad_output_(false), right_row_count_(0),
+          left_exhausted_(false) {
 
         // Use SortExecutor wrappers for sorted input
         if (!equi_conds_.empty()) {
@@ -238,8 +309,18 @@ class SortMergeJoinExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
+        left_exhausted_ = false;
+        right_row_count_ = 0;
+        if (join_type_ == FULL_JOIN) right_row_matched_.clear();
+        left_has_group_match_ = false;
+        null_pad_output_ = false;
+
         left_->beginTuple();
         if (left_->is_end()) {
+            if (join_type_ == FULL_JOIN) {
+                start_unmatched_right_phase();
+                return;
+            }
             is_end_ = true;
             return;
         }
@@ -249,19 +330,27 @@ class SortMergeJoinExecutor : public AbstractExecutor {
         right_matches_.clear();
         right_match_pos_ = 0;
 
-        // Scan right for first match, then check remaining conditions
+        // Scan right for first match
         while (!right_->is_end()) {
             auto rec = right_->Next();
             int cmp = compare_keys(*left_record_, *rec);
             if (cmp < 0) {
-                // left key < right key, advance left
+                // left key < right key. For outer join, emit NULL-padded left.
+                if (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN) {
+                    if (!null_right_)
+                        null_right_ = std::make_unique<RmRecord>(right_->tupleLen());
+                    memset(null_right_->data, 0, right_->tupleLen());
+                    null_pad_output_ = true;
+                    is_end_ = false;
+                    return;
+                }
+                // For INNER, advance left
                 left_->nextTuple();
                 if (left_->is_end()) { is_end_ = true; return; }
                 left_record_ = left_->Next();
                 continue;
             }
             if (cmp > 0) {
-                // left key > right key, advance right
                 right_->nextTuple();
                 continue;
             }
@@ -277,6 +366,14 @@ class SortMergeJoinExecutor : public AbstractExecutor {
         }
 
         if (right_matches_.empty()) {
+            if (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN) {
+                if (!null_right_)
+                    null_right_ = std::make_unique<RmRecord>(right_->tupleLen());
+                memset(null_right_->data, 0, right_->tupleLen());
+                null_pad_output_ = true;
+                is_end_ = false;
+                return;
+            }
             is_end_ = true;
             return;
         }
@@ -285,6 +382,8 @@ class SortMergeJoinExecutor : public AbstractExecutor {
         for (size_t i = 0; i < right_matches_.size(); i++) {
             right_record_ = std::make_unique<RmRecord>(right_matches_[i]);
             if (check_all_conds()) {
+                left_has_group_match_ = true;
+                null_pad_output_ = false;
                 right_match_pos_ = i + 1;
                 is_end_ = false;
                 return;
@@ -296,31 +395,116 @@ class SortMergeJoinExecutor : public AbstractExecutor {
             is_end_ = true;
             return;
         }
-
-        // Verify the match satisfies all conditions
-        if (!check_all_conds()) {
-            if (!advance_to_next_match()) {
-                is_end_ = true;
-                return;
-            }
-        }
         is_end_ = false;
     }
 
+    void start_unmatched_right_phase() {
+        left_exhausted_ = true;
+        if (!null_left_)
+            null_left_ = std::make_unique<RmRecord>(left_->tupleLen());
+        memset(null_left_->data, 0, left_->tupleLen());
+        right_->beginTuple();
+        right_row_count_ = 0;
+        if (find_unmatched_right()) {
+            is_end_ = false;
+        } else {
+            is_end_ = true;
+        }
+    }
+
     void nextTuple() override {
-        // First check remaining buffered matches for current left key
+        if (left_exhausted_) {
+            if (!find_unmatched_right()) {
+                is_end_ = true;
+            }
+            return;
+        }
+
+        // If we just emitted a NULL-padded left row (no match), advance left first
+        if (null_pad_output_) {
+            left_->nextTuple();
+            if (left_->is_end()) {
+                if (join_type_ == FULL_JOIN) {
+                    start_unmatched_right_phase();
+                } else {
+                    is_end_ = true;
+                }
+                return;
+            }
+            left_record_ = left_->Next();
+            left_has_group_match_ = false;
+            null_pad_output_ = false;
+
+            // Reset right scan for the new left row
+            right_->beginTuple();
+            right_matches_.clear();
+            right_match_pos_ = 0;
+
+            // Collect matching right rows
+            while (!right_->is_end()) {
+                auto rec = right_->Next();
+                int cmp = compare_keys(*left_record_, *rec);
+                if (cmp < 0) break;
+                if (cmp == 0) {
+                    right_matches_.push_back(*rec);
+                }
+                right_->nextTuple();
+            }
+
+            if (right_matches_.empty()) {
+                // No key match. For outer join, emit NULL-padded left.
+                if (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN) {
+                    null_pad_output_ = true;
+                    return;
+                }
+                // For INNER, advance until we find a match
+                do {
+                    left_->nextTuple();
+                    if (left_->is_end()) { is_end_ = true; return; }
+                    left_record_ = left_->Next();
+                    right_->beginTuple();
+                    right_matches_.clear();
+                    while (!right_->is_end()) {
+                        auto rec = right_->Next();
+                        int cmp = compare_keys(*left_record_, *rec);
+                        if (cmp < 0) break;
+                        if (cmp == 0) right_matches_.push_back(*rec);
+                        right_->nextTuple();
+                    }
+                } while (right_matches_.empty());
+            }
+
+            // Find first satisfying all conditions
+            for (size_t j = 0; j < right_matches_.size(); j++) {
+                right_record_ = std::make_unique<RmRecord>(right_matches_[j]);
+                if (check_all_conds()) {
+                    left_has_group_match_ = true;
+                    null_pad_output_ = false;
+                    right_match_pos_ = j + 1;
+                    return;
+                }
+            }
+            // All key-matching rows fail non-equi conditions
+            if (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN) {
+                null_pad_output_ = true;
+                return;
+            }
+            // Fall through to find next match
+        }
+
+        // Check remaining buffered matches for current left key
         while (right_match_pos_ < right_matches_.size()) {
             right_record_ = std::make_unique<RmRecord>(right_matches_[right_match_pos_++]);
-            if (check_all_conds()) return;
+            if (check_all_conds()) {
+                null_pad_output_ = false;
+                return;
+            }
         }
 
         if (!advance_to_next_match()) {
-            is_end_ = true;
-            return;
-        }
-        // Verify remaining conditions
-        if (!check_all_conds()) {
-            if (!advance_to_next_match()) {
+            if (join_type_ == FULL_JOIN) {
+                start_unmatched_right_phase();
+            } else {
                 is_end_ = true;
             }
         }
@@ -335,8 +519,17 @@ class SortMergeJoinExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
         auto rec = std::make_unique<RmRecord>(len_);
-        memcpy(rec->data, left_record_->data, left_->tupleLen());
-        memcpy(rec->data + left_->tupleLen(), right_record_->data, right_->tupleLen());
+        if (left_exhausted_) {
+            // FULL_JOIN phase 2: NULL left + right
+            memset(rec->data, 0, left_->tupleLen());
+            memcpy(rec->data + left_->tupleLen(), right_record_->data, right_->tupleLen());
+        } else if (null_pad_output_) {
+            memcpy(rec->data, left_record_->data, left_->tupleLen());
+            memset(rec->data + left_->tupleLen(), 0, right_->tupleLen());
+        } else {
+            memcpy(rec->data, left_record_->data, left_->tupleLen());
+            memcpy(rec->data + left_->tupleLen(), right_record_->data, right_->tupleLen());
+        }
         return rec;
     }
 

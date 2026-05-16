@@ -30,6 +30,11 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     bool left_has_match_;         // current left row found at least one match
     bool null_pad_output_;        // outputting left + NULL (no match case)
     std::unique_ptr<RmRecord> null_right_;
+    // FULL_JOIN: track which right rows had matches, emit unmatched after left exhausted
+    size_t right_scan_pos_;
+    std::vector<bool> right_matched_;
+    bool left_exhausted_;
+    std::unique_ptr<RmRecord> null_left_;
 
     bool eval_cond(const Condition &cond, const RmRecord &left_rec, const RmRecord &right_rec) {
         if (cond.op == OP_OR) {
@@ -119,15 +124,21 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
     // Find next matching pair. Returns true if match found.
     // Handles outer join: when right exhausted for current left, emits NULL-padded left if needed.
+    // Tracks matched right row positions for FULL_JOIN unmatched-right phase.
     bool find_next_match() {
         while (true) {
-            // Try to advance right
             right_->nextTuple();
             if (!right_->is_end()) {
                 right_record_ = right_->Next();
+                right_scan_pos_++;
                 if (check_all_conds()) {
                     left_has_match_ = true;
                     null_pad_output_ = false;
+                    if (join_type_ == FULL_JOIN) {
+                        if (right_scan_pos_ >= right_matched_.size())
+                            right_matched_.resize(right_scan_pos_ + 1, false);
+                        right_matched_[right_scan_pos_] = true;
+                    }
                     return true;
                 }
                 continue;
@@ -135,7 +146,6 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
             // Right exhausted. Check if current left row had any match.
             if (!left_has_match_ && (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN)) {
-                // Output left + NULL
                 if (!null_right_)
                     null_right_ = std::make_unique<RmRecord>(right_->tupleLen());
                 memset(null_right_->data, 0, right_->tupleLen());
@@ -153,21 +163,41 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
             // Reset right scan
             right_->beginTuple();
+            right_scan_pos_ = 0;
             if (!right_->is_end()) {
                 right_record_ = right_->Next();
+                right_scan_pos_++;
                 if (check_all_conds()) {
                     left_has_match_ = true;
+                    if (join_type_ == FULL_JOIN) {
+                        if (right_scan_pos_ >= right_matched_.size())
+                            right_matched_.resize(right_scan_pos_ + 1, false);
+                        right_matched_[right_scan_pos_] = true;
+                    }
                     return true;
                 }
             }
-            // Loop continues - right might be empty, will try to advance left
+        }
+    }
+
+    // After main loop: emit unmatched right rows for FULL_JOIN.
+    bool find_unmatched_right() {
+        while (true) {
+            right_->nextTuple();
+            if (right_->is_end()) return false;
+            right_record_ = right_->Next();
+            right_scan_pos_++;
+            if (right_scan_pos_ >= right_matched_.size() || !right_matched_[right_scan_pos_]) {
+                return true;
+            }
         }
     }
 
    public:
     NestedLoopJoinExecutor(std::unique_ptr<AbstractExecutor> left, std::unique_ptr<AbstractExecutor> right,
                             std::vector<Condition> conds, JoinType join_type = INNER_JOIN)
-        : join_type_(join_type), left_has_match_(false), null_pad_output_(false) {
+        : join_type_(join_type), left_has_match_(false), null_pad_output_(false),
+          right_scan_pos_(0), left_exhausted_(false) {
         left_ = std::move(left);
         right_ = std::move(right);
         len_ = left_->tupleLen() + right_->tupleLen();
@@ -182,8 +212,17 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
+        left_exhausted_ = false;
+        right_scan_pos_ = 0;
+        if (join_type_ == FULL_JOIN) right_matched_.clear();
+
         left_->beginTuple();
         if (left_->is_end()) {
+            // Left table empty. For FULL_JOIN, all right rows are unmatched.
+            if (join_type_ == FULL_JOIN) {
+                start_unmatched_right_phase();
+                return;
+            }
             is_end_ = true;
             return;
         }
@@ -192,10 +231,17 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         null_pad_output_ = false;
 
         right_->beginTuple();
+        right_scan_pos_ = 0;
         if (!right_->is_end()) {
             right_record_ = right_->Next();
+            right_scan_pos_++;
             if (check_all_conds()) {
                 left_has_match_ = true;
+                if (join_type_ == FULL_JOIN) {
+                    if (right_scan_pos_ >= right_matched_.size())
+                        right_matched_.resize(right_scan_pos_ + 1, false);
+                    right_matched_[right_scan_pos_] = true;
+                }
                 is_end_ = false;
                 return;
             }
@@ -203,17 +249,45 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
         if (find_next_match()) {
             is_end_ = false;
+        } else if (join_type_ == FULL_JOIN) {
+            start_unmatched_right_phase();
+        } else {
+            is_end_ = true;
+        }
+    }
+
+    void start_unmatched_right_phase() {
+        left_exhausted_ = true;
+        if (!null_left_)
+            null_left_ = std::make_unique<RmRecord>(left_->tupleLen());
+        memset(null_left_->data, 0, left_->tupleLen());
+        right_->beginTuple();
+        right_scan_pos_ = 0;
+        if (find_unmatched_right()) {
+            is_end_ = false;
         } else {
             is_end_ = true;
         }
     }
 
     void nextTuple() override {
+        if (left_exhausted_) {
+            // Phase 2: emitting unmatched right rows
+            if (!find_unmatched_right()) {
+                is_end_ = true;
+            }
+            return;
+        }
+
         // If we just emitted a NULL-padded left row (no match case), advance left first
         if (null_pad_output_) {
             left_->nextTuple();
             if (left_->is_end()) {
-                is_end_ = true;
+                if (join_type_ == FULL_JOIN) {
+                    start_unmatched_right_phase();
+                } else {
+                    is_end_ = true;
+                }
                 return;
             }
             left_record_ = left_->Next();
@@ -221,17 +295,28 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             null_pad_output_ = false;
 
             right_->beginTuple();
+            right_scan_pos_ = 0;
             if (!right_->is_end()) {
                 right_record_ = right_->Next();
+                right_scan_pos_++;
                 if (check_all_conds()) {
                     left_has_match_ = true;
+                    if (join_type_ == FULL_JOIN) {
+                        if (right_scan_pos_ >= right_matched_.size())
+                            right_matched_.resize(right_scan_pos_ + 1, false);
+                        right_matched_[right_scan_pos_] = true;
+                    }
                     return;
                 }
             }
         }
 
         if (!find_next_match()) {
-            is_end_ = true;
+            if (join_type_ == FULL_JOIN) {
+                start_unmatched_right_phase();
+            } else {
+                is_end_ = true;
+            }
         }
     }
 
@@ -244,10 +329,15 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
         auto rec = std::make_unique<RmRecord>(len_);
-        memcpy(rec->data, left_record_->data, left_->tupleLen());
-        if (null_pad_output_) {
+        if (left_exhausted_) {
+            // FULL_JOIN phase 2: NULL left + right
+            memset(rec->data, 0, left_->tupleLen());
+            memcpy(rec->data + left_->tupleLen(), right_record_->data, right_->tupleLen());
+        } else if (null_pad_output_) {
+            memcpy(rec->data, left_record_->data, left_->tupleLen());
             memset(rec->data + left_->tupleLen(), 0, right_->tupleLen());
         } else {
+            memcpy(rec->data, left_record_->data, left_->tupleLen());
             memcpy(rec->data + left_->tupleLen(), right_record_->data, right_->tupleLen());
         }
         return rec;

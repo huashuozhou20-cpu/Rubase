@@ -189,11 +189,12 @@ class Portal
             }
 
             std::unique_ptr<AbstractExecutor> join;
-            if (!equi_conds.empty() && join_type == INNER_JOIN) {
-                // SortMerge only for INNER JOIN currently
+            if (!equi_conds.empty() && (join_type == INNER_JOIN || join_type == LEFT_JOIN)) {
+                // SortMerge for INNER and LEFT JOIN with equi-conditions.
+                // FULL_JOIN stays with NestedLoopJoinExecutor for right-side unmatched tracking.
                 join = std::make_unique<SortMergeJoinExecutor>(
                     std::move(left), std::move(right),
-                    std::move(x->conds_), std::move(equi_conds));
+                    std::move(x->conds_), std::move(equi_conds), join_type);
             } else {
                 join = std::make_unique<NestedLoopJoinExecutor>(
                     std::move(left), std::move(right), std::move(x->conds_), join_type);

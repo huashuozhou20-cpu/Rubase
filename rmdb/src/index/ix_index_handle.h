@@ -46,6 +46,8 @@ inline int ix_compare(const char* a, const char* b, const std::vector<ColType>& 
     return 0;
 }
 
+class IxIndexHandle;
+
 /* 管理B+树中的每个节点 */
 class IxNodeHandle {
     friend class IxIndexHandle;
@@ -157,6 +159,61 @@ class IxNodeHandle {
     }
 };
 
+/* RAII guard that owns an IxNodeHandle and its pinned page.
+ * On destruction, unpins the page and deletes the handle. */
+class NodeHandleGuard {
+    friend class IxIndexHandle;
+    friend class IxScan;
+    BufferPoolManager *bpm_;
+    IxNodeHandle *node_;
+    bool is_dirty_;
+
+   public:
+    NodeHandleGuard(BufferPoolManager *bpm, IxNodeHandle *node)
+        : bpm_(bpm), node_(node), is_dirty_(false) {}
+
+    ~NodeHandleGuard() {
+        if (node_ != nullptr) {
+            bpm_->unpin_page(node_->get_page_id(), is_dirty_);
+            delete node_;
+        }
+    }
+
+    NodeHandleGuard(const NodeHandleGuard &) = delete;
+    NodeHandleGuard &operator=(const NodeHandleGuard &) = delete;
+
+    NodeHandleGuard(NodeHandleGuard &&other) noexcept
+        : bpm_(other.bpm_), node_(other.node_), is_dirty_(other.is_dirty_) {
+        other.node_ = nullptr;
+    }
+
+    NodeHandleGuard &operator=(NodeHandleGuard &&other) noexcept {
+        if (this != &other) {
+            if (node_ != nullptr) {
+                bpm_->unpin_page(node_->get_page_id(), is_dirty_);
+                delete node_;
+            }
+            bpm_ = other.bpm_;
+            node_ = other.node_;
+            is_dirty_ = other.is_dirty_;
+            other.node_ = nullptr;
+        }
+        return *this;
+    }
+
+    IxNodeHandle *operator->() const { return node_; }
+    IxNodeHandle *get() const { return node_; }
+    bool is_dirty() const { return is_dirty_; }
+    void set_dirty(bool dirty) { is_dirty_ = dirty; }
+
+    /** Release ownership — caller becomes responsible for unpin + delete. */
+    IxNodeHandle *release() {
+        IxNodeHandle *ret = node_;
+        node_ = nullptr;
+        return ret;
+    }
+};
+
 /* B+树 */
 class IxIndexHandle {
     friend class IxScan;
@@ -172,16 +229,18 @@ class IxIndexHandle {
    public:
     IxIndexHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd);
 
+    ~IxIndexHandle();
+
     // for search
     bool get_value(const char *key, std::vector<Rid> *result, Transaction *transaction);
 
-    std::pair<IxNodeHandle *, bool> find_leaf_page(const char *key, Operation operation, Transaction *transaction,
-                                                 bool find_first = false);
+    std::pair<NodeHandleGuard, bool> find_leaf_page(const char *key, Operation operation, Transaction *transaction,
+                                                    bool find_first = false);
 
     // for insert
     page_id_t insert_entry(const char *key, const Rid &value, Transaction *transaction);
 
-    IxNodeHandle *split(IxNodeHandle *node);
+    NodeHandleGuard split(IxNodeHandle *node);
 
     void insert_into_parent(IxNodeHandle *old_node, const char *key, IxNodeHandle *new_node, Transaction *transaction);
 
@@ -194,7 +253,7 @@ class IxIndexHandle {
 
     void redistribute(IxNodeHandle *neighbor_node, IxNodeHandle *node, IxNodeHandle *parent, int index);
 
-    bool coalesce(IxNodeHandle **neighbor_node, IxNodeHandle **node, IxNodeHandle **parent, int index,
+    bool coalesce(IxNodeHandle *&neighbor_node, IxNodeHandle *&node, IxNodeHandle *&parent, int index,
                   Transaction *transaction, bool *root_is_latched);
 
     Iid lower_bound(const char *key);
@@ -212,16 +271,19 @@ class IxIndexHandle {
     bool is_empty() const { return file_hdr_->root_page_ == IX_NO_PAGE; }
 
     // for get/create node
-    IxNodeHandle *fetch_node(int page_no) const;
+    NodeHandleGuard fetch_node(int page_no) const;
 
-    IxNodeHandle *create_node();
+    NodeHandleGuard create_node();
+
+    // Manual cleanup for complex ownership cases (e.g., coalesce double pointers).
+    void destroy_node(IxNodeHandle *node, bool is_dirty) const;
 
     // for maintain data structure
     void maintain_parent(IxNodeHandle *node);
 
     void erase_leaf(IxNodeHandle *leaf);
 
-    void release_node_handle(IxNodeHandle &node);
+    void decrement_page_count();
 
     void maintain_child(IxNodeHandle *node, int child_idx);
 

@@ -69,7 +69,7 @@ public:
         printf("log_type_: %s\n", LogTypeStr[log_type_].c_str());
         printf("lsn: %d\n", lsn_);
         printf("log_tot_len: %d\n", log_tot_len_);
-        printf("log_tid: %d\n", log_tid_);
+        printf("log_tid: %lld\n", static_cast<long long>(log_tid_));
         printf("prev_lsn: %d\n", prev_lsn_);
     }
 };
@@ -362,7 +362,7 @@ public:
 /* 日志管理器，负责把日志写入日志缓冲区，以及把日志缓冲区中的内容写入磁盘中 */
 class LogManager {
 public:
-    LogManager(DiskManager* disk_manager) : disk_manager_(disk_manager), persist_lsn_(INVALID_LSN) {
+    LogManager(DiskManager* disk_manager) : persist_lsn_(INVALID_LSN), disk_manager_(disk_manager) {
         if (enable_logging) {
             start_flush_thread();
         }

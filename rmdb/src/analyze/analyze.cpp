@@ -374,7 +374,7 @@ Value Analyze::convert_sv_value(const std::shared_ptr<ast::Value> &sv_val) {
         // store bool as int: 1 for true, 0 for false
         val.set_int(bool_lit->val ? 1 : 0);
     } else if (auto null_lit = std::dynamic_pointer_cast<ast::NullLit>(sv_val)) {
-        throw InternalError("NULL literal not yet supported in execution layer");
+        val.set_null();
     } else {
         throw InternalError("Unexpected sv value type");
     }

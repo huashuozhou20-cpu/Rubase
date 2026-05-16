@@ -35,6 +35,159 @@ class IndexScanExecutor : public AbstractExecutor {
 
     SmManager *sm_manager_;
 
+    const ColMeta *get_col_meta(const TabCol &target) {
+        for (auto &col : tab_.cols) {
+            if (col.name == target.col_name) return &col;
+        }
+        return nullptr;
+    }
+
+    bool eval_cond(const Condition &cond, const RmRecord &rec) {
+        if (cond.op == OP_OR) {
+            for (auto &child : cond.children) {
+                if (eval_cond(child, rec)) return true;
+            }
+            return cond.children.empty();
+        }
+        if (cond.op == OP_NOT) {
+            for (auto &child : cond.children) {
+                if (eval_cond(child, rec)) return false;
+            }
+            return true;
+        }
+
+        const ColMeta *lhs_meta = get_col_meta(cond.lhs_col);
+        if (!lhs_meta) return true;
+        char *lhs_data = rec.data + lhs_meta->offset;
+
+        if (cond.op == OP_IS_NULL)
+            return check_is_null(lhs_data, lhs_meta->type, lhs_meta->len);
+        if (cond.op == OP_IS_NOT_NULL)
+            return !check_is_null(lhs_data, lhs_meta->type, lhs_meta->len);
+
+        if (cond.op == OP_BETWEEN || cond.op == OP_NOT_BETWEEN) {
+            int cmp_low = 0, cmp_high = 0;
+            switch (lhs_meta->type) {
+                case TYPE_INT: {
+                    int a = *(int *)lhs_data;
+                    cmp_low = (a < cond.rhs_val.int_val) ? -1 : ((a > cond.rhs_val.int_val) ? 1 : 0);
+                    cmp_high = (a < cond.rhs_val2.int_val) ? -1 : ((a > cond.rhs_val2.int_val) ? 1 : 0);
+                    break;
+                }
+                case TYPE_FLOAT: {
+                    float a = *(float *)lhs_data;
+                    cmp_low = (a < cond.rhs_val.float_val) ? -1 : ((a > cond.rhs_val.float_val) ? 1 : 0);
+                    cmp_high = (a < cond.rhs_val2.float_val) ? -1 : ((a > cond.rhs_val2.float_val) ? 1 : 0);
+                    break;
+                }
+                default: return false;
+            }
+            bool in_range = (cmp_low >= 0 && cmp_high <= 0);
+            return (cond.op == OP_BETWEEN) ? in_range : !in_range;
+        }
+
+        if (cond.op == OP_IN || cond.op == OP_NOT_IN) {
+            bool found = false;
+            for (auto &v : cond.in_values) {
+                int cmp = 0;
+                switch (lhs_meta->type) {
+                    case TYPE_INT: {
+                        int a = *(int *)lhs_data;
+                        cmp = (a < v.int_val) ? -1 : ((a > v.int_val) ? 1 : 0);
+                        break;
+                    }
+                    case TYPE_FLOAT: {
+                        float a = *(float *)lhs_data;
+                        cmp = (a < v.float_val) ? -1 : ((a > v.float_val) ? 1 : 0);
+                        break;
+                    }
+                    case TYPE_STRING:
+                        cmp = memcmp(lhs_data, v.raw->data, lhs_meta->len);
+                        break;
+                    default: break;
+                }
+                if (cmp == 0) { found = true; break; }
+            }
+            return (cond.op == OP_IN) ? found : !found;
+        }
+
+        if (cond.is_rhs_val) {
+            int cmp = 0;
+            switch (lhs_meta->type) {
+                case TYPE_INT: {
+                    int a = *(int *)lhs_data, b = cond.rhs_val.int_val;
+                    cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+                    break;
+                }
+                case TYPE_FLOAT: {
+                    float a = *(float *)lhs_data, b = cond.rhs_val.float_val;
+                    cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+                    break;
+                }
+                case TYPE_STRING:
+                    cmp = memcmp(lhs_data, cond.rhs_val.raw->data, lhs_meta->len);
+                    break;
+                default: return false;
+            }
+            switch (cond.op) {
+                case OP_EQ: return cmp == 0;
+                case OP_NE: return cmp != 0;
+                case OP_LT: return cmp < 0;
+                case OP_GT: return cmp > 0;
+                case OP_LE: return cmp <= 0;
+                case OP_GE: return cmp >= 0;
+                case OP_LIKE: {
+                    std::string lhs_str(lhs_data, lhs_meta->len);
+                    return like_match(lhs_str, cond.rhs_val.str_val);
+                }
+                case OP_NOT_LIKE: {
+                    std::string lhs_str(lhs_data, lhs_meta->len);
+                    return !like_match(lhs_str, cond.rhs_val.str_val);
+                }
+                default: return true;
+            }
+        } else {
+            const ColMeta *rhs_meta = get_col_meta(cond.rhs_col);
+            if (!rhs_meta) return true;
+            char *rhs_data = rec.data + rhs_meta->offset;
+            if (lhs_meta->type != rhs_meta->type) return false;
+            int cmp = 0;
+            switch (lhs_meta->type) {
+                case TYPE_INT: {
+                    int a = *(int *)lhs_data, b = *(int *)rhs_data;
+                    cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+                    break;
+                }
+                case TYPE_FLOAT: {
+                    float a = *(float *)lhs_data, b = *(float *)rhs_data;
+                    cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+                    break;
+                }
+                case TYPE_STRING:
+                    cmp = memcmp(lhs_data, rhs_data, lhs_meta->len);
+                    break;
+                default: return false;
+            }
+            switch (cond.op) {
+                case OP_EQ: return cmp == 0;
+                case OP_NE: return cmp != 0;
+                case OP_LT: return cmp < 0;
+                case OP_GT: return cmp > 0;
+                case OP_LE: return cmp <= 0;
+                case OP_GE: return cmp >= 0;
+                default: return true;
+            }
+        }
+    }
+
+    bool check_all_conds(const RmRecord &rec) {
+        if (fed_conds_.empty()) return true;
+        for (auto &cond : fed_conds_) {
+            if (!eval_cond(cond, rec)) return false;
+        }
+        return true;
+    }
+
    public:
     IndexScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds,
                       std::vector<std::string> index_col_names, Context *context) {
@@ -56,9 +209,7 @@ class IndexScanExecutor : public AbstractExecutor {
 
         for (auto &cond : conds_) {
             if (cond.lhs_col.tab_name != tab_name_) {
-                // lhs is on other table, now rhs must be on this table
                 assert(!cond.is_rhs_val && cond.rhs_col.tab_name == tab_name_);
-                // swap lhs and rhs
                 std::swap(cond.lhs_col, cond.rhs_col);
                 auto it = swap_op.find(cond.op);
                 if (it != swap_op.end()) {
@@ -75,12 +226,10 @@ class IndexScanExecutor : public AbstractExecutor {
                       .at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols))
                       .get();
 
-        // 从等值条件中提取key，构造查找范围
         char *key = new char[index_meta_.col_tot_len];
         memset(key, 0, index_meta_.col_tot_len);
         int offset = 0;
-        for (size_t i = 0; i < index_meta_.col_num; i++) {
-            // 查找匹配当前索引列的等值条件
+        for (size_t i = 0; i < static_cast<size_t>(index_meta_.col_num); i++) {
             for (auto &cond : fed_conds_) {
                 if (cond.is_rhs_val && cond.op == OP_EQ &&
                     cond.lhs_col.col_name == index_meta_.cols[i].name &&
@@ -102,12 +251,16 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     void nextTuple() override {
-        scan_->next();
-        if (scan_->is_end()) {
-            is_end_ = true;
-            return;
+        while (true) {
+            scan_->next();
+            if (scan_->is_end()) {
+                is_end_ = true;
+                return;
+            }
+            rid_ = scan_->rid();
+            auto rec = fh_->get_record(rid_, context_);
+            if (check_all_conds(*rec)) return;
         }
-        rid_ = scan_->rid();
     }
 
     bool is_end() const override { return is_end_; }
