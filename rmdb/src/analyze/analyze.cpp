@@ -41,11 +41,15 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         std::vector<ColMeta> all_cols;
         get_all_cols(query->tables, all_cols);
         if (query->cols.empty()) {
-            // select * : expand to all columns
-            for (auto &col : all_cols) {
-                TabCol sel_col = {.tab_name = col.tab_name, .col_name = col.name};
-                query->cols.push_back(sel_col);
+            if (!query->has_agg && x->exprs.empty()) {
+                // select * : expand to all columns (only for non-aggregate, non-expression queries)
+                for (auto &col : all_cols) {
+                    TabCol sel_col = {.tab_name = col.tab_name, .col_name = col.name};
+                    query->cols.push_back(sel_col);
+                }
             }
+            // For aggregate/expression-only queries, leave cols empty; the projection
+            // will be built from agg/expr output columns by the planner.
         } else {
             // infer table name from column name
             for (auto &sel_col : query->cols) {

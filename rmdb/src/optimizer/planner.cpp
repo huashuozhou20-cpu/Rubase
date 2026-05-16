@@ -396,8 +396,19 @@ std::shared_ptr<Plan> Planner::generate_select_plan(std::shared_ptr<Query> query
 
     //物理优化
     auto sel_cols = query->cols;
+    // If no regular columns (pure aggregate query), build projection from agg column names
+    if (sel_cols.empty() && query->has_agg) {
+        auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
+        if (x) {
+            for (auto &agg : x->aggs) {
+                TabCol col;
+                col.col_name = agg->col_name;
+                sel_cols.push_back(col);
+            }
+        }
+    }
     std::shared_ptr<Plan> plannerRoot = physical_optimization(query, context);
-    plannerRoot = std::make_shared<ProjectionPlan>(T_Projection, std::move(plannerRoot), 
+    plannerRoot = std::make_shared<ProjectionPlan>(T_Projection, std::move(plannerRoot),
                                                         std::move(sel_cols));
 
     return plannerRoot;
