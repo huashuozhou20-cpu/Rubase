@@ -69,4 +69,7 @@ private:
     void update_group_lock_mode(LockRequestQueue& queue);
     bool is_compatible(LockMode request_mode, GroupLockMode group_mode);
     GroupLockMode lock_mode_to_group_mode(LockMode mode);
+
+    // Deadlock detection: check if request creates a cycle in wait-for graph
+    bool would_deadlock(txn_id_t requestor, const LockRequestQueue& queue);
 };

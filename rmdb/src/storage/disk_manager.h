@@ -38,7 +38,7 @@ class DiskManager {
 
     page_id_t allocate_page(int fd);
 
-    void deallocate_page(page_id_t page_id);
+    void deallocate_page(int fd, page_id_t page_id);
 
     /*目录操作*/
     bool is_dir(const std::string &path);
@@ -96,4 +96,5 @@ class DiskManager {
 
     int log_fd_ = -1;                             // WAL日志文件的文件句柄，默认为-1，代表未打开日志文件
     std::atomic<page_id_t> fd2pageno_[MAX_FD]{};  // 文件中已经分配的页面个数，初始值为0
+    std::unordered_map<int, std::vector<page_id_t>> free_pages_;  // per-fd free page list
 };

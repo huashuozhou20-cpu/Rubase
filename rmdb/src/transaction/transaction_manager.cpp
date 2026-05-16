@@ -27,6 +27,12 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
     }
     txn->set_state(TransactionState::GROWING);
 
+    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+        txn->set_read_ts(next_timestamp_++);
+        txn->set_start_ts(txn->get_read_ts());
+        running_txns_.AddTxn(txn->get_read_ts());
+    }
+
     std::scoped_lock lock(latch_);
     TransactionManager::txn_map[txn->get_transaction_id()] = txn;
 
@@ -57,9 +63,20 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     txn->get_write_set()->clear();
 
     txn->set_state(TransactionState::COMMITTED);
+    txn->set_commit_ts(next_timestamp_++);
+
+    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+        running_txns_.RemoveTxn(txn->get_read_ts());
+    }
 
     std::scoped_lock lock(latch_);
-    TransactionManager::txn_map.erase(txn->get_transaction_id());
+    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+        // In MVCC mode, keep the transaction in the map for version chain traversal.
+        // GarbageCollection will clean it up later when below the watermark.
+        running_txns_.UpdateCommitTs(txn->get_commit_ts());
+    } else {
+        TransactionManager::txn_map.erase(txn->get_transaction_id());
+    }
 }
 
 /**
@@ -101,9 +118,18 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     txn->get_lock_set()->clear();
 
     txn->set_state(TransactionState::ABORTED);
+    txn->set_commit_ts(next_timestamp_++);
+
+    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+        running_txns_.RemoveTxn(txn->get_read_ts());
+    }
 
     std::scoped_lock lock(latch_);
-    TransactionManager::txn_map.erase(txn->get_transaction_id());
+    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+        running_txns_.UpdateCommitTs(txn->get_commit_ts());
+    } else {
+        TransactionManager::txn_map.erase(txn->get_transaction_id());
+    }
 }
 
 /* ===== MVCC Methods ===== */

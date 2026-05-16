@@ -10,6 +10,9 @@ See the Mulan PSL v2 for more details. */
 
 #include "lock_manager.h"
 
+#include <functional>
+#include <unordered_set>
+
 LockManager::GroupLockMode LockManager::lock_mode_to_group_mode(LockMode mode) {
     switch (mode) {
         case LockMode::SHARED:              return GroupLockMode::S;
@@ -92,6 +95,11 @@ bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, 
 
     // Check compatibility
     if (!is_compatible(lock_mode, queue.group_lock_mode_)) {
+        // Check for deadlock before denying
+        if (would_deadlock(txn->get_transaction_id(), queue)) {
+            throw TransactionAbortException(txn->get_transaction_id(),
+                                            AbortReason::DEADLOCK_PREVENTION);
+        }
         return false;
     }
 
@@ -158,6 +166,59 @@ bool LockManager::lock_IX_on_table(Transaction* txn, int tab_fd) {
 /**
  * @description: 释放锁
  */
+bool LockManager::would_deadlock(txn_id_t requestor, const LockRequestQueue& queue) {
+    // Collect all txn_ids that hold locks on this item (blocking the requestor)
+    std::unordered_set<txn_id_t> blockers;
+    for (auto& req : queue.request_queue_) {
+        if (req.granted_ && req.txn_id_ != requestor) {
+            blockers.insert(req.txn_id_);
+        }
+    }
+    if (blockers.empty()) return false;
+
+    // Build wait-for graph from all lock queues
+    // Edge: waiter -> holder
+    std::unordered_map<txn_id_t, std::unordered_set<txn_id_t>> wait_for;
+    for (auto& [id, q] : lock_table_) {
+        std::unordered_set<txn_id_t> held_by;
+        for (auto& req : q.request_queue_) {
+            if (req.granted_) held_by.insert(req.txn_id_);
+        }
+        for (auto& req : q.request_queue_) {
+            if (!req.granted_) {
+                for (auto holder : held_by) {
+                    if (holder != req.txn_id_) {
+                        wait_for[req.txn_id_].insert(holder);
+                    }
+                }
+            }
+        }
+    }
+    // Also consider: if requestor were waiting, would there be a cycle?
+    for (auto blocker : blockers) {
+        wait_for[requestor].insert(blocker);
+    }
+
+    // DFS cycle detection
+    std::unordered_set<txn_id_t> visited, rec_stack;
+    std::function<bool(txn_id_t)> dfs = [&](txn_id_t u) -> bool {
+        visited.insert(u);
+        rec_stack.insert(u);
+        for (auto v : wait_for[u]) {
+            if (rec_stack.count(v)) return true;
+            if (!visited.count(v) && dfs(v)) return true;
+        }
+        rec_stack.erase(u);
+        return false;
+    };
+
+    bool has_cycle = dfs(requestor);
+    // Remove temporary edges
+    wait_for[requestor].clear();
+
+    return has_cycle;
+}
+
 bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
     std::scoped_lock lock(latch_);
 

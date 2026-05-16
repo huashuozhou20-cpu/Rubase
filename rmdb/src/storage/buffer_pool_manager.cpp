@@ -160,6 +160,7 @@ bool BufferPoolManager::delete_page(PageId page_id) {
         disk_manager_->write_page(page->id_.fd, page->id_.page_no, page->data_, PAGE_SIZE);
     }
     replacer_->pin(frame_id);
+    disk_manager_->deallocate_page(page->id_.fd, page->id_.page_no);
     page_table_.erase(it);
     page->reset_memory();
     page->id_ = {.fd = INVALID_PAGE_ID, .page_no = INVALID_PAGE_ID};

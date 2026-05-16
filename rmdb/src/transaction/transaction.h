@@ -98,7 +98,9 @@ class Transaction {
     inline std::shared_ptr<std::unordered_set<LockDataId>> get_lock_set() { return lock_set_; }
 
     inline timestamp_t get_read_ts() const { return read_ts_; }
+    inline void set_read_ts(timestamp_t ts) { read_ts_ = ts; }
     inline timestamp_t get_commit_ts() const { return commit_ts_; }
+    inline void set_commit_ts(timestamp_t ts) { commit_ts_ = ts; }
 
     /** 修改现有的撤销日志 */
     inline auto ModifyUndoLog(int log_idx, UndoLog new_log) {

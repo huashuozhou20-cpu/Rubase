@@ -17,25 +17,27 @@ See the Mulan PSL v2 for more details. */
 
 class NestedLoopJoinExecutor : public AbstractExecutor {
    private:
-    std::unique_ptr<AbstractExecutor> left_;    // 左儿子节点（需要join的表）
-    std::unique_ptr<AbstractExecutor> right_;   // 右儿子节点（需要join的表）
-    size_t len_;                                // join后获得的每条记录的长度
-    std::vector<ColMeta> cols_;                 // join后获得的记录的字段
+    std::unique_ptr<AbstractExecutor> left_;
+    std::unique_ptr<AbstractExecutor> right_;
+    size_t len_;
+    std::vector<ColMeta> cols_;
 
-    std::vector<Condition> fed_conds_;          // join条件
+    std::vector<Condition> fed_conds_;
     bool is_end_;
     std::unique_ptr<RmRecord> left_record_;
     std::unique_ptr<RmRecord> right_record_;
+    JoinType join_type_;
+    bool left_has_match_;         // current left row found at least one match
+    bool null_pad_output_;        // outputting left + NULL (no match case)
+    std::unique_ptr<RmRecord> null_right_;
 
     bool eval_cond(const Condition &cond, const RmRecord &left_rec, const RmRecord &right_rec) {
-        // OR
         if (cond.op == OP_OR) {
             for (auto &child : cond.children) {
                 if (eval_cond(child, left_rec, right_rec)) return true;
             }
             return cond.children.empty();
         }
-        // NOT
         if (cond.op == OP_NOT) {
             for (auto &child : cond.children) {
                 if (eval_cond(child, left_rec, right_rec)) return false;
@@ -43,7 +45,6 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             return true;
         }
 
-        // Find lhs column
         ColMeta lhs_col_meta = get_col_meta(cond.lhs_col);
         char *lhs_data = nullptr;
         if (!lhs_col_meta.tab_name.empty()) {
@@ -52,15 +53,11 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                            : right_rec.data + lhs_col_meta.offset;
         }
 
-        // IS NULL / IS NOT NULL
-        if (cond.op == OP_IS_NULL) {
+        if (cond.op == OP_IS_NULL)
             return check_is_null(lhs_data, lhs_col_meta.type, lhs_col_meta.len);
-        }
-        if (cond.op == OP_IS_NOT_NULL) {
+        if (cond.op == OP_IS_NOT_NULL)
             return !check_is_null(lhs_data, lhs_col_meta.type, lhs_col_meta.len);
-        }
 
-        // For comparison ops, get rhs
         const auto &rhs_col_meta = get_col_meta(cond.rhs_col);
         char *rhs_data = nullptr;
         if (!rhs_col_meta.tab_name.empty()) {
@@ -120,31 +117,57 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         return true;
     }
 
+    // Find next matching pair. Returns true if match found.
+    // Handles outer join: when right exhausted for current left, emits NULL-padded left if needed.
     bool find_next_match() {
         while (true) {
-            // 尝试推进右表
+            // Try to advance right
             right_->nextTuple();
             if (!right_->is_end()) {
                 right_record_ = right_->Next();
-                if (check_all_conds()) return true;
+                if (check_all_conds()) {
+                    left_has_match_ = true;
+                    null_pad_output_ = false;
+                    return true;
+                }
                 continue;
             }
-            // 右表遍历完，推进左表，重置右表
+
+            // Right exhausted. Check if current left row had any match.
+            if (!left_has_match_ && (join_type_ == LEFT_JOIN || join_type_ == FULL_JOIN)) {
+                // Output left + NULL
+                if (!null_right_)
+                    null_right_ = std::make_unique<RmRecord>(right_->tupleLen());
+                memset(null_right_->data, 0, right_->tupleLen());
+                null_pad_output_ = true;
+                left_has_match_ = true;  // mark so we advance on next call
+                return true;
+            }
+
+            // Advance to next left row
             left_->nextTuple();
             if (left_->is_end()) return false;
             left_record_ = left_->Next();
+            left_has_match_ = false;
+            null_pad_output_ = false;
 
+            // Reset right scan
             right_->beginTuple();
             if (!right_->is_end()) {
                 right_record_ = right_->Next();
-                if (check_all_conds()) return true;
+                if (check_all_conds()) {
+                    left_has_match_ = true;
+                    return true;
+                }
             }
+            // Loop continues - right might be empty, will try to advance left
         }
     }
 
    public:
     NestedLoopJoinExecutor(std::unique_ptr<AbstractExecutor> left, std::unique_ptr<AbstractExecutor> right,
-                            std::vector<Condition> conds) {
+                            std::vector<Condition> conds, JoinType join_type = INNER_JOIN)
+        : join_type_(join_type), left_has_match_(false), null_pad_output_(false) {
         left_ = std::move(left);
         right_ = std::move(right);
         len_ = left_->tupleLen() + right_->tupleLen();
@@ -153,7 +176,6 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         for (auto &col : right_cols) {
             col.offset += left_->tupleLen();
         }
-
         cols_.insert(cols_.end(), right_cols.begin(), right_cols.end());
         is_end_ = true;
         fed_conds_ = std::move(conds);
@@ -166,16 +188,19 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             return;
         }
         left_record_ = left_->Next();
+        left_has_match_ = false;
+        null_pad_output_ = false;
 
         right_->beginTuple();
         if (!right_->is_end()) {
             right_record_ = right_->Next();
             if (check_all_conds()) {
+                left_has_match_ = true;
                 is_end_ = false;
                 return;
             }
         }
-        // 寻找第一个满足条件的配对
+
         if (find_next_match()) {
             is_end_ = false;
         } else {
@@ -184,6 +209,27 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     }
 
     void nextTuple() override {
+        // If we just emitted a NULL-padded left row (no match case), advance left first
+        if (null_pad_output_) {
+            left_->nextTuple();
+            if (left_->is_end()) {
+                is_end_ = true;
+                return;
+            }
+            left_record_ = left_->Next();
+            left_has_match_ = false;
+            null_pad_output_ = false;
+
+            right_->beginTuple();
+            if (!right_->is_end()) {
+                right_record_ = right_->Next();
+                if (check_all_conds()) {
+                    left_has_match_ = true;
+                    return;
+                }
+            }
+        }
+
         if (!find_next_match()) {
             is_end_ = true;
         }
@@ -199,7 +245,11 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         if (is_end_) return nullptr;
         auto rec = std::make_unique<RmRecord>(len_);
         memcpy(rec->data, left_record_->data, left_->tupleLen());
-        memcpy(rec->data + left_->tupleLen(), right_record_->data, right_->tupleLen());
+        if (null_pad_output_) {
+            memset(rec->data + left_->tupleLen(), 0, right_->tupleLen());
+        } else {
+            memcpy(rec->data + left_->tupleLen(), right_record_->data, right_->tupleLen());
+        }
         return rec;
     }
 

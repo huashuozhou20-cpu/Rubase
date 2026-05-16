@@ -281,7 +281,7 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
             }
 
             table_join_executors = std::make_shared<JoinPlan>(choose_join_tag(),
-                std::move(table_join_executors), std::move(right), join_conds);
+                std::move(table_join_executors), std::move(right), join_conds, item.join_type);
         }
 
         // 处理剩余条件：尝试下推到子计划

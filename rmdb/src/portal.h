@@ -172,26 +172,31 @@ class Portal
         } else if(auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
             std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
             std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context);
+            JoinType join_type = x->type;
+
+            // RIGHT JOIN: swap sides, use LEFT JOIN
+            if (join_type == RIGHT_JOIN) {
+                std::swap(left, right);
+                join_type = LEFT_JOIN;
+            }
 
             // Extract equi-join conditions (col = col)
             std::vector<Condition> equi_conds;
-            std::vector<Condition> other_conds;
             for (auto &c : x->conds_) {
                 if (!c.is_rhs_val && c.op == OP_EQ) {
                     equi_conds.push_back(c);
-                } else {
-                    other_conds.push_back(c);
                 }
             }
 
             std::unique_ptr<AbstractExecutor> join;
-            if (!equi_conds.empty()) {
+            if (!equi_conds.empty() && join_type == INNER_JOIN) {
+                // SortMerge only for INNER JOIN currently
                 join = std::make_unique<SortMergeJoinExecutor>(
                     std::move(left), std::move(right),
                     std::move(x->conds_), std::move(equi_conds));
             } else {
                 join = std::make_unique<NestedLoopJoinExecutor>(
-                    std::move(left), std::move(right), std::move(x->conds_));
+                    std::move(left), std::move(right), std::move(x->conds_), join_type);
             }
             return join;
         } else if(auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {

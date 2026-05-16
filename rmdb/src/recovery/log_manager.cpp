@@ -43,4 +43,32 @@ void LogManager::flush_log_to_disk() {
         persist_lsn_ = global_lsn_ - 1;
         log_buffer_.offset_ = 0;
     }
+    flush_cv_.notify_one();
+}
+
+void LogManager::flush_thread_loop() {
+    while (!stop_flush_) {
+        {
+            std::unique_lock<std::mutex> lock(flush_mutex_);
+            flush_cv_.wait_for(lock, log_timeout, [this] {
+                return stop_flush_.load();
+            });
+        }
+        if (stop_flush_) break;
+        flush_log_to_disk();
+    }
+}
+
+void LogManager::start_flush_thread() {
+    if (flush_thread_.joinable()) return;
+    stop_flush_ = false;
+    flush_thread_ = std::thread(&LogManager::flush_thread_loop, this);
+}
+
+void LogManager::stop_flush_thread() {
+    stop_flush_ = true;
+    flush_cv_.notify_all();
+    if (flush_thread_.joinable()) {
+        flush_thread_.join();
+    }
 }

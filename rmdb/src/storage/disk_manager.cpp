@@ -61,14 +61,20 @@ void DiskManager::read_page(int fd, page_id_t page_no, char *offset, int num_byt
  * @param {int} fd 指定文件的文件句柄
  */
 page_id_t DiskManager::allocate_page(int fd) {
-    // 简单的自增分配策略，指定文件的页面编号加1
     assert(fd >= 0 && fd < MAX_FD);
+    // Check free list first for recycled pages
+    auto it = free_pages_.find(fd);
+    if (it != free_pages_.end() && !it->second.empty()) {
+        page_id_t page_id = it->second.back();
+        it->second.pop_back();
+        return page_id;
+    }
     return fd2pageno_[fd]++;
 }
 
-void DiskManager::deallocate_page(__attribute__((unused)) page_id_t page_id) {
-    // The current sequential allocator (fd2pageno_++) does not support page recycling.
-    // A free-list per fd would be needed to reuse deallocated pages.
+void DiskManager::deallocate_page(int fd, page_id_t page_id) {
+    assert(fd >= 0 && fd < MAX_FD);
+    free_pages_[fd].push_back(page_id);
 }
 
 bool DiskManager::is_dir(const std::string& path) {

@@ -10,7 +10,10 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <iostream>
 #include "log_defs.h"
@@ -359,17 +362,34 @@ public:
 /* 日志管理器，负责把日志写入日志缓冲区，以及把日志缓冲区中的内容写入磁盘中 */
 class LogManager {
 public:
-    LogManager(DiskManager* disk_manager) { disk_manager_ = disk_manager; }
-    
+    LogManager(DiskManager* disk_manager) : disk_manager_(disk_manager), persist_lsn_(INVALID_LSN) {
+        if (enable_logging) {
+            start_flush_thread();
+        }
+    }
+
+    ~LogManager() { stop_flush_thread(); }
+
     lsn_t add_log_to_buffer(LogRecord* log_record);
     void flush_log_to_disk();
 
     LogBuffer* get_log_buffer() { return &log_buffer_; }
 
-private:    
+    void start_flush_thread();
+    void stop_flush_thread();
+
+private:
     std::atomic<lsn_t> global_lsn_{0};  // 全局lsn，递增，用于为每条记录分发lsn
     std::mutex latch_;                  // 用于对log_buffer_的互斥访问
     LogBuffer log_buffer_;              // 日志缓冲区
     lsn_t persist_lsn_;                 // 记录已经持久化到磁盘中的最后一条日志的日志号
     DiskManager* disk_manager_;
+
+    // Background flush thread
+    std::thread flush_thread_;
+    std::atomic<bool> stop_flush_{false};
+    std::condition_variable flush_cv_;
+    std::mutex flush_mutex_;
+
+    void flush_thread_loop();
 }; 
