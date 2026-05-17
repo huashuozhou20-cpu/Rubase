@@ -102,13 +102,15 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     }
 
     ColMeta get_col_meta(const TabCol &target) {
-        for (auto &col : cols_) {
-            if (col.tab_name == target.tab_name && col.name == target.col_name) return col;
-        }
+        // Search child columns first for correct original offsets
         for (auto &col : left_->cols()) {
             if (col.tab_name == target.tab_name && col.name == target.col_name) return col;
         }
         for (auto &col : right_->cols()) {
+            if (col.tab_name == target.tab_name && col.name == target.col_name) return col;
+        }
+        // Fallback: combined cols_ (right offsets shifted by left len)
+        for (auto &col : cols_) {
             if (col.tab_name == target.tab_name && col.name == target.col_name) return col;
         }
         return ColMeta{};
