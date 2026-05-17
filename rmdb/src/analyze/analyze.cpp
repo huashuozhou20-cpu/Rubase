@@ -45,25 +45,25 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         if (query->tables.empty()) query->tables = x->tabs;  // fallback
         // 检查表是否存在，扩展视图
         std::vector<std::string> expanded_tables;
+        std::map<std::string, std::shared_ptr<ast::SelectStmt>> view_col_map;  // table → view stmt
         for (auto &tab_name : query->tables) {
             if (sm_manager_->db_.is_table(tab_name)) {
                 expanded_tables.push_back(tab_name);
             } else {
-                // Check if it's a view
                 auto vit = view_defs.find(tab_name);
                 if (vit != view_defs.end()) {
                     auto view_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(vit->second);
                     if (view_stmt) {
-                        // Add underlying tables
                         for (auto &t : view_stmt->tabs) {
-                            if (!sm_manager_->db_.is_table(t)) continue;  // skip aliases
+                            if (!sm_manager_->db_.is_table(t)) continue;
                             expanded_tables.push_back(t);
+                            // Remember view column restriction for * expansion
+                            if (!view_stmt->cols.empty())
+                                view_col_map[t] = view_stmt;
                         }
-                        // Merge view columns into the query
-                        if (x->cols.empty()) {
-                            for (auto &col : view_stmt->cols)
-                                x->cols.push_back(col);
-                        }
+                        for (auto &j : view_stmt->joins)
+                            if (sm_manager_->db_.is_table(j->tab_name))
+                                expanded_tables.push_back(j->tab_name);
                         // Merge view conditions (WHERE)
                         if (view_stmt->cond) {
                             if (x->cond) {
@@ -77,7 +77,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                         continue;
                     }
                 }
-                sm_manager_->db_.get_table(tab_name);  // throws TableNotFoundError
+                sm_manager_->db_.get_table(tab_name);
             }
         }
         query->tables = expanded_tables;
@@ -107,8 +107,18 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         }
         if (query->cols.empty()) {
             if (!query->has_agg && x->exprs.empty()) {
-                // select * : expand to all columns (only for non-aggregate, non-expression queries)
+                // select * : expand to all columns
+                // For views with column restrictions, only include view columns
+                auto view_stmt = view_col_map.empty() ? nullptr : view_col_map.begin()->second;
                 for (auto &col : all_cols) {
+                    if (view_stmt && !view_stmt->cols.empty()) {
+                        bool in_view = false;
+                        for (auto &vc : view_stmt->cols) {
+                            if (vc->col_name == col.name && (vc->tab_name.empty() || vc->tab_name == col.tab_name))
+                            { in_view = true; break; }
+                        }
+                        if (!in_view) continue;
+                    }
                     TabCol sel_col = {.tab_name = col.tab_name, .col_name = col.name};
                     query->cols.push_back(sel_col);
                 }
