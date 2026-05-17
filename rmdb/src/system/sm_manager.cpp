@@ -179,13 +179,19 @@ void SmManager::desc_table(const std::string& tab_name, Context* context) {
     printer.print_separator(context);
     printer.print_record(captions, context);
     printer.print_separator(context);
+    // Write header to file
+    std::fstream outfile;
+    outfile.open("output.txt", std::ios::out | std::ios::app);
+    outfile << "| Field | Type | Index |\n";
     // Print fields
     for (auto &col : tab.cols) {
         std::vector<std::string> field_info = {col.name, coltype2str(col.type), col.index ? "YES" : "NO"};
         printer.print_record(field_info, context);
+        outfile << "| " << col.name << " | " << coltype2str(col.type) << " | " << (col.index ? "YES" : "NO") << " |\n";
     }
     // Print footer
     printer.print_separator(context);
+    outfile.close();
 }
 
 /**

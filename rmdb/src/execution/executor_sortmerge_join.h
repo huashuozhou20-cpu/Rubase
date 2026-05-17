@@ -31,8 +31,13 @@ class SortMergeJoinExecutor : public AbstractExecutor {
     bool is_end_;
     std::unique_ptr<RmRecord> left_record_;
     std::unique_ptr<RmRecord> right_record_;
-    std::vector<RmRecord> right_matches_;  // buffered matches for current left key
+    struct RightMatch {
+        RmRecord rec;
+        size_t pos;  // scan position in right side
+    };
+    std::vector<RightMatch> right_matches_;  // buffered matches for current left key
     size_t right_match_pos_;
+    size_t right_position_;        // current scan position in right side
     bool left_has_group_match_;    // current left key group had at least one full match
     bool null_pad_output_;         // emitting left + NULL (no match case)
     std::unique_ptr<RmRecord> null_right_;
@@ -166,13 +171,24 @@ class SortMergeJoinExecutor : public AbstractExecutor {
         return true;
     }
 
+    void mark_right_match(size_t pos) {
+        if (join_type_ == FULL_JOIN) {
+            if (pos >= right_row_matched_.size())
+                right_row_matched_.resize(pos + 1, false);
+            right_row_matched_[pos] = true;
+        }
+    }
+
     bool advance_to_next_match() {
         while (true) {
             if (right_match_pos_ < right_matches_.size()) {
-                right_record_ = std::make_unique<RmRecord>(right_matches_[right_match_pos_++]);
+                right_record_ = std::make_unique<RmRecord>(right_matches_[right_match_pos_].rec);
+                size_t matched_pos = right_matches_[right_match_pos_].pos;
+                right_match_pos_++;
                 if (check_all_conds()) {
                     left_has_group_match_ = true;
                     null_pad_output_ = false;
+                    mark_right_match(matched_pos);
                     return true;
                 }
                 continue;
@@ -207,13 +223,14 @@ class SortMergeJoinExecutor : public AbstractExecutor {
                 if (cmp < 0) {
                     break;
                 }
-                right_matches_.push_back(*rec);
+                right_position_++;
+                right_matches_.push_back({*rec, right_position_});
                 right_->nextTuple();
             }
             // Remove non-matching entries from the start
             size_t i = 0;
             while (i < right_matches_.size()) {
-                int cmp = compare_keys(*left_record_, right_matches_[i]);
+                int cmp = compare_keys(*left_record_, right_matches_[i].rec);
                 if (cmp == 0) break;
                 i++;
             }
@@ -222,11 +239,12 @@ class SortMergeJoinExecutor : public AbstractExecutor {
             if (!right_matches_.empty()) {
                 // Check buffered matches for any that satisfy all conditions
                 for (size_t j = 0; j < right_matches_.size(); j++) {
-                    right_record_ = std::make_unique<RmRecord>(right_matches_[j]);
+                    right_record_ = std::make_unique<RmRecord>(right_matches_[j].rec);
                     if (check_all_conds()) {
                         left_has_group_match_ = true;
                         null_pad_output_ = false;
                         right_match_pos_ = j + 1;
+                        mark_right_match(right_matches_[j].pos);
                         return true;
                     }
                 }
@@ -255,6 +273,7 @@ class SortMergeJoinExecutor : public AbstractExecutor {
 
             // For INNER_JOIN: rewind right for next left tuple
             right_->beginTuple();
+            right_position_ = 0;
             if (right_->is_end()) return false;
         }
     }
@@ -280,8 +299,8 @@ class SortMergeJoinExecutor : public AbstractExecutor {
                           std::vector<Condition> equi_conds,
                           JoinType join_type = INNER_JOIN)
         : join_type_(join_type), conds_(std::move(conds)), equi_conds_(std::move(equi_conds)),
-          left_has_group_match_(false), null_pad_output_(false), right_row_count_(0),
-          left_exhausted_(false) {
+          right_position_(0), left_has_group_match_(false), null_pad_output_(false),
+          right_row_count_(0), left_exhausted_(false) {
 
         // Use SortExecutor wrappers for sorted input
         if (!equi_conds_.empty()) {
@@ -329,6 +348,7 @@ class SortMergeJoinExecutor : public AbstractExecutor {
         right_->beginTuple();
         right_matches_.clear();
         right_match_pos_ = 0;
+        right_position_ = 0;
 
         // Scan right for first match
         while (!right_->is_end()) {
@@ -355,13 +375,17 @@ class SortMergeJoinExecutor : public AbstractExecutor {
                 continue;
             }
             // Keys match, buffer all matching right tuples
+            right_position_++;
+            right_matches_.push_back({*rec, right_position_});
             while (!right_->is_end()) {
-                auto r2 = right_->Next();
-                if (compare_keys(*left_record_, *r2) != 0) break;
-                right_matches_.push_back(*r2);
-                right_->nextTuple();
+                right_->nextTuple(); // advance before reading next
+                if (!right_->is_end()) {
+                    auto r2 = right_->Next();
+                    if (compare_keys(*left_record_, *r2) != 0) break;
+                    right_position_++;
+                    right_matches_.push_back({*r2, right_position_});
+                }
             }
-            right_matches_.push_back(*rec);
             break;
         }
 
@@ -380,11 +404,12 @@ class SortMergeJoinExecutor : public AbstractExecutor {
 
         // Find first match that satisfies all conditions
         for (size_t i = 0; i < right_matches_.size(); i++) {
-            right_record_ = std::make_unique<RmRecord>(right_matches_[i]);
+            right_record_ = std::make_unique<RmRecord>(right_matches_[i].rec);
             if (check_all_conds()) {
                 left_has_group_match_ = true;
                 null_pad_output_ = false;
                 right_match_pos_ = i + 1;
+                mark_right_match(right_matches_[i].pos);
                 is_end_ = false;
                 return;
             }
@@ -439,6 +464,7 @@ class SortMergeJoinExecutor : public AbstractExecutor {
             right_->beginTuple();
             right_matches_.clear();
             right_match_pos_ = 0;
+            right_position_ = 0;
 
             // Collect matching right rows
             while (!right_->is_end()) {
@@ -446,7 +472,8 @@ class SortMergeJoinExecutor : public AbstractExecutor {
                 int cmp = compare_keys(*left_record_, *rec);
                 if (cmp < 0) break;
                 if (cmp == 0) {
-                    right_matches_.push_back(*rec);
+                    right_position_++;
+                    right_matches_.push_back({*rec, right_position_});
                 }
                 right_->nextTuple();
             }
@@ -464,11 +491,15 @@ class SortMergeJoinExecutor : public AbstractExecutor {
                     left_record_ = left_->Next();
                     right_->beginTuple();
                     right_matches_.clear();
+                    right_position_ = 0;
                     while (!right_->is_end()) {
                         auto rec = right_->Next();
                         int cmp = compare_keys(*left_record_, *rec);
                         if (cmp < 0) break;
-                        if (cmp == 0) right_matches_.push_back(*rec);
+                        if (cmp == 0) {
+                            right_position_++;
+                            right_matches_.push_back({*rec, right_position_});
+                        }
                         right_->nextTuple();
                     }
                 } while (right_matches_.empty());
@@ -476,11 +507,12 @@ class SortMergeJoinExecutor : public AbstractExecutor {
 
             // Find first satisfying all conditions
             for (size_t j = 0; j < right_matches_.size(); j++) {
-                right_record_ = std::make_unique<RmRecord>(right_matches_[j]);
+                right_record_ = std::make_unique<RmRecord>(right_matches_[j].rec);
                 if (check_all_conds()) {
                     left_has_group_match_ = true;
                     null_pad_output_ = false;
                     right_match_pos_ = j + 1;
+                    mark_right_match(right_matches_[j].pos);
                     return;
                 }
             }
@@ -494,9 +526,12 @@ class SortMergeJoinExecutor : public AbstractExecutor {
 
         // Check remaining buffered matches for current left key
         while (right_match_pos_ < right_matches_.size()) {
-            right_record_ = std::make_unique<RmRecord>(right_matches_[right_match_pos_++]);
+            right_record_ = std::make_unique<RmRecord>(right_matches_[right_match_pos_].rec);
+            size_t matched_pos = right_matches_[right_match_pos_].pos;
+            right_match_pos_++;
             if (check_all_conds()) {
                 null_pad_output_ = false;
+                mark_right_match(matched_pos);
                 return;
             }
         }

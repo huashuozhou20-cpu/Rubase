@@ -12,6 +12,6 @@ See the Mulan PSL v2 for more details. */
 
 std::chrono::milliseconds cycle_detection_interval{10};
 
-std::atomic<bool> enable_logging{false};
+std::atomic<bool> enable_logging{true};
 
 std::chrono::duration<int64_t> log_timeout{1};
