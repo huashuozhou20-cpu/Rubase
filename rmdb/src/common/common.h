@@ -64,13 +64,13 @@ struct Value {
     }
 
     void init_raw(int len) {
+        if (raw != nullptr) return;  // already initialized
         if (is_null_) {
             // Create NULL sentinel for the actual column type at the given length
             raw = std::make_shared<RmRecord>(len);
             memset(raw->data, 0, len);
             return;
         }
-        assert(raw == nullptr);
         raw = std::make_shared<RmRecord>(len);
         if (type == TYPE_INT) {
             assert(len == sizeof(int));

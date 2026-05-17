@@ -114,11 +114,25 @@ class InsertExecutor : public AbstractExecutor {
                 val.init_raw(col->len);
                 memcpy(rec.data + col->offset, val.raw->data, col->len);
             }
-            // Fill AUTO_INCREMENT values for unspecified columns
+            // Fill AUTO_INCREMENT and DEFAULT values for unspecified columns
             for (size_t ci = 0; ci < tab_.cols.size(); ci++) {
-                if (!col_set[ci] && auto_inc_next_[ci] > 0) {
+                if (col_set[ci]) continue;
+                if (auto_inc_next_[ci] > 0) {
                     int val = auto_inc_next_[ci]++;
                     memcpy(rec.data + tab_.cols[ci].offset, &val, sizeof(int));
+                } else if (tab_.cols[ci].has_default) {
+                    auto &d = tab_.cols[ci].default_val;
+                    auto &col = tab_.cols[ci];
+                    if (col.type == TYPE_INT) {
+                        int v = d.empty() ? 0 : std::stoi(d);
+                        memcpy(rec.data + col.offset, &v, sizeof(int));
+                    } else if (col.type == TYPE_FLOAT) {
+                        float v = d.empty() ? 0.0f : std::stof(d);
+                        memcpy(rec.data + col.offset, &v, sizeof(float));
+                    } else if (col.type == TYPE_STRING) {
+                        memset(rec.data + col.offset, 0, col.len);
+                        memcpy(rec.data + col.offset, d.c_str(), std::min(d.size(), (size_t)col.len));
+                    }
                 }
             }
             // Insert into record file

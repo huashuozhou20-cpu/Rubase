@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT
+%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT AS
 %token TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE
 %token AVG BETWEEN COUNT DISTINCT FULL GROUP HAVING IN INNER IS LEFT LIKE LIMIT
@@ -557,22 +557,28 @@ selectItems:
     ;
 
 selectItemList:
-        expr
+        expr opt_alias
     {
         $$ = std::vector<std::shared_ptr<Expr>>{$1};
     }
-    |   selectItemList ',' expr
+    |   selectItemList ',' expr opt_alias
     {
         $$.push_back($3);
     }
     ;
 
+opt_alias:
+        /* empty */
+    |   IDENTIFIER
+    |   AS IDENTIFIER
+    ;
+
 fromList:
-        tbName
+        tbName opt_alias
     {
         $$ = std::vector<std::string>{$1};
     }
-    |   fromList ',' tbName
+    |   fromList ',' tbName opt_alias
     {
         $$.push_back($3);
     }
@@ -608,19 +614,19 @@ joinType:
     ;
 
 joinClause:
-        joinType JOIN tbName ON condition
+        joinType JOIN tbName opt_alias ON condition
     {
-        $$ = std::make_shared<JoinExpr>($3, $5, static_cast<JoinType>($1));
+        $$ = std::make_shared<JoinExpr>($3, $6, static_cast<JoinType>($1));
     }
-    |   JOIN tbName ON condition
+    |   JOIN tbName opt_alias ON condition
     {
-        $$ = std::make_shared<JoinExpr>($2, $4, INNER_JOIN);
+        $$ = std::make_shared<JoinExpr>($2, $5, INNER_JOIN);
     }
-    |   joinType JOIN tbName
+    |   joinType JOIN tbName opt_alias
     {
         $$ = std::make_shared<JoinExpr>($3, nullptr, static_cast<JoinType>($1));
     }
-    |   JOIN tbName
+    |   JOIN tbName opt_alias
     {
         $$ = std::make_shared<JoinExpr>($2, nullptr, INNER_JOIN);
     }

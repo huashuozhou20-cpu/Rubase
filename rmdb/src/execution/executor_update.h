@@ -70,6 +70,7 @@ class UpdateExecutor : public AbstractExecutor {
                         if (col.not_null && rhs_val.is_null_) {
                             throw RMDBError("Column '" + col.name + "' cannot be NULL");
                         }
+                        rhs_val.init_raw(col.len);
                         memcpy(new_rec->data + col.offset, rhs_val.raw->data, col.len);
                         break;
                     }
