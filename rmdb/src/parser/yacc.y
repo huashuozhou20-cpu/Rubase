@@ -261,6 +261,10 @@ field:
     {
         $$ = std::make_shared<ColDef>($1, $2, false, nullptr);
     }
+    |   colName type VALUE_NULL
+    {
+        $$ = std::make_shared<ColDef>($1, $2, false, nullptr);
+    }
     |   colName type NOT VALUE_NULL
     {
         $$ = std::make_shared<ColDef>($1, $2, true, nullptr);
@@ -312,8 +316,8 @@ type:
     }
     |   CHAR
     {
-        // CHAR without length defaults to 1 char (4 bytes)
-        $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, 4);
+        // CHAR without length defaults to 256 bytes
+        $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, 256);
     }
     |   FLOAT
     {

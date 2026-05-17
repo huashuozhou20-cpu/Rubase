@@ -120,6 +120,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 "VIEW" { return VIEW; }
 "CONCAT" { return CONCAT; }
 "DATE" { return CHAR; }
+"TEXT" { return CHAR; }
 "ENABLE_NESTLOOP" { return ENABLE_NESTLOOP; }
 "ENABLE_SORTMERGE" { return ENABLE_SORTMERGE; }
 "TRUE" { 
