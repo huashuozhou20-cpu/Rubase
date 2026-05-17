@@ -289,7 +289,8 @@ type:
     }
     |   CHAR '(' VALUE_INT ')'
     {
-        $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, $3);
+        // Multiply by 4 for UTF-8 multi-byte character support
+        $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, $3 * 4);
     }
     |   FLOAT
     {
