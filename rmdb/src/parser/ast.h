@@ -43,6 +43,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <map>
 #include <vector>
 #include <string>
 #include <memory>
@@ -470,8 +471,11 @@ struct JoinExpr : public TreeNode {
     std::string tab_name;                     // 要 JOIN 的表名
     std::shared_ptr<CondExpr> cond;           // ON 条件（可为空表示无 ON）
     JoinType type;                            // 连接类型
-    JoinExpr(std::string tab_name_, std::shared_ptr<CondExpr> cond_, JoinType type_)
-        : tab_name(std::move(tab_name_)), cond(std::move(cond_)), type(type_) {}
+    std::string alias;                        // 表别名（可为空）
+    JoinExpr(std::string tab_name_, std::shared_ptr<CondExpr> cond_, JoinType type_,
+             std::string alias_ = "")
+        : tab_name(std::move(tab_name_)), cond(std::move(cond_)), type(type_),
+          alias(std::move(alias_)) {}
 };
 
 // ---- SELECT 查询语句 ----
@@ -508,6 +512,8 @@ struct SelectStmt : public TreeNode {
     std::vector<std::shared_ptr<Expr>> exprs;  // arithmetic and other expressions
     std::vector<std::string> tabs;
     std::vector<std::shared_ptr<JoinExpr>> joins;
+    // alias → real table name
+    std::map<std::string, std::string> table_aliases;
     std::shared_ptr<CondExpr> cond;
     std::shared_ptr<GroupBy> group_by;
     std::shared_ptr<CondExpr> having;

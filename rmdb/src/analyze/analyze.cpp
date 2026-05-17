@@ -21,8 +21,26 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
     std::shared_ptr<Query> query = std::make_shared<Query>();
     if (auto x = std::dynamic_pointer_cast<ast::SelectStmt>(parse))
     {
-        // 处理表名
-        query->tables = std::move(x->tabs);
+        // 处理表名和别名
+        aliases_.clear();
+        // fromList now contains [tab1, alias1?, tab2, alias2?, ...]
+        // Extract aliases: entry after a real table name that is NOT a real table is an alias
+        for (size_t i = 0; i + 1 < x->tabs.size(); i++) {
+            std::string &name = x->tabs[i];
+            std::string &next = x->tabs[i+1];
+            bool name_is_table = sm_manager_->db_.is_table(name);
+            bool next_is_table = sm_manager_->db_.is_table(next);
+            if (name_is_table && !next_is_table) {
+                aliases_[next] = name;  // alias → real
+                i++;  // skip alias
+            }
+        }
+        // Build real table list (exclude aliases)
+        for (auto &t : x->tabs) {
+            if (aliases_.count(t)) continue;  // skip aliases
+            query->tables.push_back(t);
+        }
+        if (query->tables.empty()) query->tables = x->tabs;  // fallback
         // 检查表是否存在
         for (auto &tab_name : query->tables) {
             sm_manager_->db_.get_table(tab_name);  // throws TableNotFoundError
@@ -162,6 +180,13 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
 
 
 TabCol Analyze::check_column(const std::vector<ColMeta> &all_cols, TabCol target) {
+    // Resolve table alias
+    if (!target.tab_name.empty()) {
+        auto it = aliases_.find(target.tab_name);
+        if (it != aliases_.end()) {
+            target.tab_name = it->second;
+        }
+    }
     if (target.tab_name.empty()) {
         // Table name not specified, infer table name from column name
         std::string tab_name;

@@ -59,6 +59,7 @@ class Analyze
 {
 private:
     SmManager *sm_manager_;
+    std::map<std::string, std::string> aliases_;  // alias → real table name
 public:
     Analyze(SmManager *sm_manager) : sm_manager_(sm_manager){}
     ~Analyze(){}

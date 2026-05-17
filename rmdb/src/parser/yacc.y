@@ -49,7 +49,7 @@ using namespace ast;
 %type <sv_val> value
 %type <sv_vals> valueList
 %type <sv_vals_list> valueTupleList
-%type <sv_str> tbName colName
+%type <sv_str> tbName colName optAliasStr
 %type <sv_strs> colNameList fromList optColList
 %type <sv_col> col
 %type <sv_cols> colList
@@ -192,9 +192,13 @@ dml:
         }
         stmt->tabs = $5;
         stmt->joins = $6;
-        // also add join table names to tabs for backward compatibility
+        // Collect join table names and aliases (alias AFTER table, like fromList)
         for (auto &j : stmt->joins) {
             stmt->tabs.push_back(j->tab_name);
+            if (!j->alias.empty()) {
+                stmt->table_aliases[j->alias] = j->tab_name;
+                stmt->tabs.push_back(j->alias);
+            }
         }
         stmt->cond = $7;
         stmt->group_by = $8;
@@ -569,19 +573,27 @@ selectItemList:
     ;
 
 opt_alias:
-        /* empty */
-    |   IDENTIFIER
-    |   AS IDENTIFIER
+        /* empty */     { }
+    |   IDENTIFIER      { }
+    |   AS IDENTIFIER   { }
+    ;
+
+optAliasStr:
+        /* empty */     { $$ = ""; }
+    |   IDENTIFIER      { $$ = $1; }
+    |   AS IDENTIFIER   { $$ = $2; }
     ;
 
 fromList:
-        tbName opt_alias
+        tbName optAliasStr
     {
         $$ = std::vector<std::string>{$1};
+        if (!$2.empty()) $$.push_back($2);
     }
-    |   fromList ',' tbName opt_alias
+    |   fromList ',' tbName optAliasStr
     {
         $$.push_back($3);
+        if (!$4.empty()) $$.push_back($4);
     }
     ;
 
@@ -615,21 +627,21 @@ joinType:
     ;
 
 joinClause:
-        joinType JOIN tbName opt_alias ON condition
+        joinType JOIN tbName optAliasStr ON condition
     {
-        $$ = std::make_shared<JoinExpr>($3, $6, static_cast<JoinType>($1));
+        $$ = std::make_shared<JoinExpr>($3, $6, static_cast<JoinType>($1), $4);
     }
-    |   JOIN tbName opt_alias ON condition
+    |   JOIN tbName optAliasStr ON condition
     {
-        $$ = std::make_shared<JoinExpr>($2, $5, INNER_JOIN);
+        $$ = std::make_shared<JoinExpr>($2, $5, INNER_JOIN, $3);
     }
-    |   joinType JOIN tbName opt_alias
+    |   joinType JOIN tbName optAliasStr
     {
-        $$ = std::make_shared<JoinExpr>($3, nullptr, static_cast<JoinType>($1));
+        $$ = std::make_shared<JoinExpr>($3, nullptr, static_cast<JoinType>($1), $4);
     }
-    |   JOIN tbName opt_alias
+    |   JOIN tbName optAliasStr
     {
-        $$ = std::make_shared<JoinExpr>($2, nullptr, INNER_JOIN);
+        $$ = std::make_shared<JoinExpr>($2, nullptr, INNER_JOIN, $3);
     }
     ;
 
