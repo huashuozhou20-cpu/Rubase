@@ -110,14 +110,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             }
         }
 
-        // 处理 HAVING 条件
-        if (x->having) {
-            std::vector<Condition> having_conds;
-            get_clause(x->having, having_conds);
-            check_clause(query->tables, having_conds);
-            // HAVING conditions are stored separately in the AST for the executor to use
-        }
-
+        // HAVING conditions are processed in the planner (generate_select_plan)
         // 校验 LIMIT 值
         if (x->limit) {
             if (x->limit->limit <= 0) {
@@ -248,7 +241,15 @@ void Analyze::get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector
             }
         } else if (auto binary = std::dynamic_pointer_cast<ast::BinaryExpr>(node)) {
             Condition c;
-            c.lhs_col = {.tab_name = binary->lhs->tab_name, .col_name = binary->lhs->col_name};
+            if (auto lhs_col = std::dynamic_pointer_cast<ast::Col>(binary->lhs)) {
+                c.lhs_col = {.tab_name = lhs_col->tab_name, .col_name = lhs_col->col_name};
+            } else if (auto lhs_agg = std::dynamic_pointer_cast<ast::AggExpr>(binary->lhs)) {
+                // HAVING agg > N: use the aggregate's column name
+                c.lhs_col = {.tab_name = "", .col_name = lhs_agg->col_name};
+            } else {
+                // unknown lhs expression — skip
+                c.lhs_col = {.tab_name = "", .col_name = ""};
+            }
             c.op = convert_sv_comp_op(binary->op);
             if (auto rhs_val = std::dynamic_pointer_cast<ast::Value>(binary->rhs)) {
                 c.is_rhs_val = true;

@@ -384,7 +384,7 @@ cond_not:
     ;
 
 cond_base:
-        col op expr
+        expr op expr
     {
         $$ = std::make_shared<BinaryExpr>($1, $2, $3);
     }

@@ -158,11 +158,17 @@ class AggregationExecutor : public AbstractExecutor {
         switch (lhs_meta->type) {
             case TYPE_INT: {
                 int a = *(int *)lhs_data, b = cond.rhs_val.int_val;
+                if (cond.rhs_val.type == TYPE_FLOAT)
+                    b = (int)cond.rhs_val.float_val;
                 cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
                 break;
             }
             case TYPE_FLOAT: {
-                float a = *(float *)lhs_data, b = cond.rhs_val.float_val;
+                float a = *(float *)lhs_data, b;
+                if (cond.rhs_val.type == TYPE_INT)
+                    b = (float)cond.rhs_val.int_val;
+                else
+                    b = cond.rhs_val.float_val;
                 cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
                 break;
             }

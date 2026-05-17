@@ -298,12 +298,12 @@ struct LogicExpr : public CondExpr {
         : op(op_), args(std::move(args_)) {}
 };
 
-// 二元比较: col op (value | col | arith_expr)
+// 二元比较: expr op expr (col/agg/value op col/agg/value)
 struct BinaryExpr : public CondExpr {
-    std::shared_ptr<Col> lhs;
+    std::shared_ptr<Expr> lhs;
     SvCompOp op;
-    std::shared_ptr<Expr> rhs;   // 可以是 Value 或 Col（列-列比较）
-    BinaryExpr(std::shared_ptr<Col> lhs_, SvCompOp op_, std::shared_ptr<Expr> rhs_)
+    std::shared_ptr<Expr> rhs;
+    BinaryExpr(std::shared_ptr<Expr> lhs_, SvCompOp op_, std::shared_ptr<Expr> rhs_)
         : lhs(std::move(lhs_)), op(op_), rhs(std::move(rhs_)) {}
 };
 
