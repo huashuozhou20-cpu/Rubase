@@ -28,6 +28,8 @@ typedef enum PlanTag{
     T_DropTable,
     T_CreateIndex,
     T_DropIndex,
+    T_CreateView,
+    T_DropView,
     T_SetKnob,
     T_Insert,
     T_Update,
@@ -183,13 +185,15 @@ class DDLPlan : public Plan
 class OtherPlan : public Plan
 {
     public:
-        OtherPlan(PlanTag tag, std::string tab_name)
+        OtherPlan(PlanTag tag, std::string tab_name, std::string def = "")
         {
             Plan::tag = tag;
-            tab_name_ = std::move(tab_name);            
+            tab_name_ = std::move(tab_name);
+            def_ = std::move(def);
         }
         ~OtherPlan(){}
         std::string tab_name_;
+        std::string def_;
 };
 
 // Set Knob Plan

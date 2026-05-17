@@ -403,6 +403,18 @@ struct DropIndex : public TreeNode {
         : tab_name(std::move(tab_name_)), col_names(std::move(col_names_)) {}
 };
 
+struct CreateView : public TreeNode {
+    std::string view_name;
+    std::shared_ptr<TreeNode> select_stmt;
+    CreateView(std::string name, std::shared_ptr<TreeNode> stmt)
+        : view_name(std::move(name)), select_stmt(std::move(stmt)) {}
+};
+
+struct DropView : public TreeNode {
+    std::string view_name;
+    DropView(std::string name) : view_name(std::move(name)) {}
+};
+
 // ============================================================================
 // 第八部分：DML 语句节点
 // ============================================================================

@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT AS CONCAT
+%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT AS CONCAT VIEW
 %token TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE
 %token AVG BETWEEN COUNT DISTINCT FULL GROUP HAVING IN INNER IS LEFT LIKE LIMIT
@@ -159,6 +159,14 @@ ddl:
     |   DROP INDEX tbName '(' colNameList ')'
     {
         $$ = std::make_shared<DropIndex>($3, $5);
+    }
+    |   CREATE VIEW tbName AS dml
+    {
+        $$ = std::make_shared<CreateView>($3, $5);
+    }
+    |   DROP VIEW tbName
+    {
+        $$ = std::make_shared<DropView>($3);
     }
     ;
 

@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #include "analyze.h"
 #include <functional>
+#include <map>
+extern std::map<std::string, std::shared_ptr<ast::TreeNode>> view_defs;
 
 /**
  * @description: 分析器，进行语义分析和查询重写，需要检查不符合语义规定的部分
@@ -41,10 +43,44 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             query->tables.push_back(t);
         }
         if (query->tables.empty()) query->tables = x->tabs;  // fallback
-        // 检查表是否存在
+        // 检查表是否存在，扩展视图
+        std::vector<std::string> expanded_tables;
         for (auto &tab_name : query->tables) {
-            sm_manager_->db_.get_table(tab_name);  // throws TableNotFoundError
+            if (sm_manager_->db_.is_table(tab_name)) {
+                expanded_tables.push_back(tab_name);
+            } else {
+                // Check if it's a view
+                auto vit = view_defs.find(tab_name);
+                if (vit != view_defs.end()) {
+                    auto view_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(vit->second);
+                    if (view_stmt) {
+                        // Add underlying tables
+                        for (auto &t : view_stmt->tabs) {
+                            if (!sm_manager_->db_.is_table(t)) continue;  // skip aliases
+                            expanded_tables.push_back(t);
+                        }
+                        // Merge view columns into the query
+                        if (x->cols.empty()) {
+                            for (auto &col : view_stmt->cols)
+                                x->cols.push_back(col);
+                        }
+                        // Merge view conditions (WHERE)
+                        if (view_stmt->cond) {
+                            if (x->cond) {
+                                auto and_expr = std::make_shared<ast::LogicExpr>(ast::LOGIC_AND,
+                                    std::vector<std::shared_ptr<ast::CondExpr>>{x->cond, view_stmt->cond});
+                                x->cond = and_expr;
+                            } else {
+                                x->cond = view_stmt->cond;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                sm_manager_->db_.get_table(tab_name);  // throws TableNotFoundError
+            }
         }
+        query->tables = expanded_tables;
 
         // 处理 SELECT 投影列
         for (auto &sv_sel_col : x->cols) {

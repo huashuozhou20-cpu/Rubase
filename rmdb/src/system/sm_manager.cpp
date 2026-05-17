@@ -391,3 +391,17 @@ void SmManager::drop_index(const std::string& tab_name, const std::vector<ColMet
     for (auto &col : cols) col_names.push_back(col.name);
     drop_index(tab_name, col_names, context);
 }
+
+void SmManager::create_view(const std::string& view_name, const std::string& def) {
+    if (db_.is_table(view_name) || db_.is_view(view_name))
+        throw RMDBError("Relation '" + view_name + "' already exists");
+    db_.set_view(view_name, def);
+    flush_meta();
+}
+
+void SmManager::drop_view(const std::string& view_name) {
+    if (!db_.is_view(view_name))
+        throw RMDBError("View '" + view_name + "' not found");
+    db_.drop_view(view_name);
+    flush_meta();
+}

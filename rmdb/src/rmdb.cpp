@@ -45,6 +45,8 @@ auto log_manager = std::make_unique<LogManager>(disk_manager.get());
 auto recovery = std::make_unique<RecoveryManager>(disk_manager.get(), buffer_pool_manager.get(), sm_manager.get());
 auto portal = std::make_unique<Portal>(sm_manager.get());
 auto analyze = std::make_unique<Analyze>(sm_manager.get());
+// View definitions: name → SelectStmt AST
+std::map<std::string, std::shared_ptr<ast::TreeNode>> view_defs;
 pthread_mutex_t *buffer_mutex;
 pthread_mutex_t *sockfd_mutex;
 
@@ -277,6 +279,29 @@ void *client_handler(void *sock_fd) {
             if (yyparse() == 0) {
                 if (ast::parse_tree != nullptr) {
                     try {
+                        // Handle CREATE VIEW / DROP VIEW
+                        if (auto cv = std::dynamic_pointer_cast<ast::CreateView>(ast::parse_tree)) {
+                            view_defs[cv->view_name] = cv->select_stmt;
+                            sm_manager->create_view(cv->view_name, "");
+                            Result r{Result::SUCCESS, ""};
+                            memcpy(data_send, r.msg.c_str(), r.msg.length());
+                            offset = r.msg.length();
+                            yy_delete_buffer(buf);
+                            finish_analyze = true;
+                            pthread_mutex_unlock(buffer_mutex);
+                            goto send_response;
+                        }
+                        if (auto dv = std::dynamic_pointer_cast<ast::DropView>(ast::parse_tree)) {
+                            view_defs.erase(dv->view_name);
+                            sm_manager->drop_view(dv->view_name);
+                            Result r{Result::SUCCESS, ""};
+                            memcpy(data_send, r.msg.c_str(), r.msg.length());
+                            offset = r.msg.length();
+                            yy_delete_buffer(buf);
+                            finish_analyze = true;
+                            pthread_mutex_unlock(buffer_mutex);
+                            goto send_response;
+                        }
                         // Resolve subqueries in WHERE/HAVING conditions before analysis
                         if (auto stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
                             resolve_subqueries(stmt->cond);
@@ -339,6 +364,7 @@ void *client_handler(void *sock_fd) {
                 pthread_mutex_unlock(buffer_mutex);
             }
             // 将格式化结果发送给客户端
+            send_response:
             if (send_result_to_client(fd, data_send, offset) < 0) {
                 send_error = true;
                 delete context;

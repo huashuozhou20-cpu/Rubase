@@ -117,6 +117,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 "PRIMARY" { return PRIMARY; }
 "KEY" { return KEY; }
 "AUTO_INCREMENT" { return AUTO_INCREMENT; }
+"VIEW" { return VIEW; }
 "CONCAT" { return CONCAT; }
 "ENABLE_NESTLOOP" { return ENABLE_NESTLOOP; }
 "ENABLE_SORTMERGE" { return ENABLE_SORTMERGE; }

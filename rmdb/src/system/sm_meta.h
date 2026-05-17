@@ -174,12 +174,25 @@ class DbMeta {
    private:
     std::string name_;                      // 数据库名称
     std::map<std::string, TabMeta> tabs_;   // 数据库中包含的表
+    std::map<std::string, std::string> views_;  // 视图: name -> definition SQL
 
    public:
     // DbMeta(std::string name) : name_(name) {}
 
     /* 判断数据库中是否存在指定名称的表 */
     bool is_table(const std::string &tab_name) const { return tabs_.find(tab_name) != tabs_.end(); }
+
+    bool is_view(const std::string &name) const { return views_.find(name) != views_.end(); }
+
+    std::string get_view(const std::string &name) const {
+        auto it = views_.find(name);
+        if (it == views_.end()) throw TableNotFoundError(name);
+        return it->second;
+    }
+
+    void set_view(const std::string &name, const std::string &def) { views_[name] = def; }
+
+    void drop_view(const std::string &name) { views_.erase(name); }
 
     void SetTabMeta(const std::string &tab_name, const TabMeta &meta) {
         tabs_[tab_name] = meta;
@@ -201,6 +214,10 @@ class DbMeta {
         for (auto &entry : db_meta.tabs_) {
             os << entry.second << '\n';
         }
+        os << db_meta.views_.size() << '\n';
+        for (auto &entry : db_meta.views_) {
+            os << entry.first << '\n' << entry.second.size() << '\n' << entry.second;
+        }
         return os;
     }
 
@@ -211,6 +228,20 @@ class DbMeta {
             TabMeta tab;
             is >> tab;
             db_meta.tabs_[tab.name] = tab;
+        }
+        size_t vn;
+        if (is >> vn) {
+            is.ignore(1);  // skip newline after count
+            for (size_t i = 0; i < vn; i++) {
+                std::string vname;
+                std::getline(is, vname);
+                size_t vlen;
+                is >> vlen;
+                is.ignore(1);  // skip newline
+                std::string vdef(vlen, ' ');
+                is.read(&vdef[0], vlen);
+                db_meta.views_[vname] = vdef;
+            }
         }
         return is;
     }
