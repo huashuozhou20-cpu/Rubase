@@ -253,6 +253,15 @@ class SeqScanExecutor : public AbstractExecutor {
 
     const std::vector<ColMeta> &cols() const override { return cols_; }
 
+    ColMeta get_col_offset(const TabCol &target) override {
+        for (auto &col : cols_) {
+            if (col.name == target.col_name &&
+                (target.tab_name.empty() || col.tab_name == target.tab_name))
+                return col;
+        }
+        return ColMeta{};
+    }
+
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
         return fh_->get_record(rid_, context_);

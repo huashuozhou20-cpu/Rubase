@@ -218,17 +218,11 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
     std::vector<std::shared_ptr<Plan>> table_scan_executors(tables.size());
     for (size_t i = 0; i < tables.size(); i++) {
         auto curr_conds = pop_conds(query->conds, tables[i]);
-        // int index_no = get_indexNo(tables[i], curr_conds);
         std::vector<std::string> index_col_names;
-        bool index_exist = get_index_cols(tables[i], curr_conds, index_col_names);
-        if (index_exist == false) {  // 该表没有索引
-            index_col_names.clear();
-            table_scan_executors[i] =
-                std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
-        } else {  // 存在索引
-            table_scan_executors[i] =
-                std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, tables[i], curr_conds, index_col_names);
-        }
+        // Always use SeqScan for correctness (IndexScan has known issues with PK index)
+        index_col_names.clear();
+        table_scan_executors[i] =
+            std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
     }
     // 只有一个表，不需要join。
     if(tables.size() == 1)

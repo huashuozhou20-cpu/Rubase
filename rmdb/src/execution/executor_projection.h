@@ -72,5 +72,14 @@ class ProjectionExecutor : public AbstractExecutor {
         return proj_rec;
     }
 
+    ColMeta get_col_offset(const TabCol &target) override {
+        for (auto &col : cols_) {
+            if (col.name == target.col_name &&
+                (target.tab_name.empty() || col.tab_name == target.tab_name))
+                return col;
+        }
+        return ColMeta{};
+    }
+
     Rid &rid() override { return _abstract_rid; }
 };
