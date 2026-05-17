@@ -110,15 +110,15 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
                     auto rec = root_exec->Next();
                     if (!rec) { txn_manager->abort(sub_txn, log_manager.get()); return; }
                     auto &cols = root_exec->cols();
-                    float val = 0;
                     if (!cols.empty()) {
                         auto &col = cols[0];
                         if (col.type == TYPE_INT)
-                            val = (float)*(int *)(rec->data + col.offset);
+                            binary->rhs = std::make_shared<ast::IntLit>(*(int *)(rec->data + col.offset));
                         else if (col.type == TYPE_FLOAT)
-                            val = *(float *)(rec->data + col.offset);
+                            binary->rhs = std::make_shared<ast::FloatLit>(*(float *)(rec->data + col.offset));
+                        else
+                            binary->rhs = std::make_shared<ast::FloatLit>(0);
                     }
-                    binary->rhs = std::make_shared<ast::FloatLit>(val);
                 }
                 txn_manager->commit(sub_txn, log_manager.get());
             } catch (RMDBError &e) {
