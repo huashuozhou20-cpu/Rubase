@@ -87,39 +87,26 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
     if (auto binary = std::dynamic_pointer_cast<ast::BinaryExpr>(node)) {
         resolve_subqueries(binary->lhs);
         if (auto sub = std::dynamic_pointer_cast<ast::SubqueryExpr>(binary->rhs)) {
-            // Execute subquery and get scalar value — use a COPY to avoid modifying original
-            auto sub_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(sub->subquery);
-            if (!sub_stmt) return;
-            auto sub_copy = std::make_shared<ast::SelectStmt>();
-            sub_copy->tabs = sub_stmt->tabs;
-            sub_copy->cols = sub_stmt->cols;
-            sub_copy->aggs = sub_stmt->aggs;
-            sub_copy->exprs = sub_stmt->exprs;
-            sub_copy->joins = sub_stmt->joins;
-            sub_copy->cond = sub_stmt->cond;
-            sub_copy->group_by = sub_stmt->group_by;
-            sub_copy->having = sub_stmt->having;
-            sub_copy->order = sub_stmt->order;
-            sub_copy->limit = sub_stmt->limit;
-            sub_copy->has_distinct = sub_stmt->has_distinct;
-            sub_copy->is_agg = sub_stmt->is_agg;
-            Analyze sub_analyze(sm_manager.get());
-            std::shared_ptr<Query> sub_query;
+            // Execute scalar subquery and replace with result value
             try {
-                sub_query = sub_analyze.do_analyze(sub_copy);
-            } catch (RMDBError &e) {
-                std::cerr << "Subquery analyze error: " << e.what() << std::endl;
-                return;
-            }
-            Context sub_ctx(lock_manager.get(), log_manager.get(), nullptr, nullptr, nullptr);
-            auto sub_plan = planner->do_planner(sub_query, &sub_ctx);
-            // Build executor tree via portal
-            auto root_exec = portal->convert_plan_executor(sub_plan, &sub_ctx);
-            // Execute and extract scalar
-            try {
+                Analyze sub_analyze(sm_manager.get());
+                auto sub_query = sub_analyze.do_analyze(sub->subquery);
+                char sub_buf[BUFFER_LENGTH];
+                int sub_offset = 0;
+                auto sub_txn = txn_manager->begin(nullptr, log_manager.get());
+                Context sub_ctx(lock_manager.get(), log_manager.get(), sub_txn, sub_buf, &sub_offset);
+                auto sub_plan = planner->do_planner(sub_query, &sub_ctx);
+                // Unwrap DMLPlan wrapper
+                if (auto dml = std::dynamic_pointer_cast<DMLPlan>(sub_plan))
+                    sub_plan = dml->subplan_;
+                auto root_exec = portal->convert_plan_executor(sub_plan, &sub_ctx);
+                if (!root_exec) {
+                    txn_manager->abort(sub_txn, log_manager.get()); return;
+                }
                 root_exec->beginTuple();
                 if (!root_exec->is_end()) {
                     auto rec = root_exec->Next();
+                    if (!rec) { txn_manager->abort(sub_txn, log_manager.get()); return; }
                     auto &cols = root_exec->cols();
                     float val = 0;
                     if (!cols.empty()) {
@@ -131,7 +118,9 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
                     }
                     binary->rhs = std::make_shared<ast::FloatLit>(val);
                 }
+                txn_manager->commit(sub_txn, log_manager.get());
             } catch (RMDBError &e) {
+                std::cerr << "Subquery failed: " << e.what() << std::endl;
             }
         } else {
             resolve_subqueries(binary->rhs);
@@ -251,7 +240,10 @@ void *client_handler(void *sock_fd) {
             if (yyparse() == 0) {
                 if (ast::parse_tree != nullptr) {
                     try {
-                        // TODO: resolve_subqueries(ast::parse_tree);
+                        // Resolve subqueries in WHERE/HAVING conditions before analysis
+                        if (auto stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
+                            resolve_subqueries(stmt->cond);
+                        }
                         // analyze and rewrite
                         std::shared_ptr<Query> query = analyze->do_analyze(ast::parse_tree);
                         yy_delete_buffer(buf);
