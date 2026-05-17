@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT AS
+%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT AS CONCAT
 %token TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE
 %token AVG BETWEEN COUNT DISTINCT FULL GROUP HAVING IN INNER IS LEFT LIKE LIMIT
@@ -71,6 +71,7 @@ using namespace ast;
 // intermediate non-terminals for expression and condition trees
 %type <sv_cond> cond_or cond_and cond_not cond_base
 %type <sv_expr> expr_add_sub expr_mul_div expr_unary expr_base
+%type <sv_exprs> expr_list
 
 %%
 
@@ -425,6 +426,14 @@ cond_base:
     {
         $$ = std::make_shared<InExpr>($1, true, $5);
     }
+    |   col IN '(' dml ')'
+    {
+        $$ = std::make_shared<InExpr>($1, false, std::vector<std::shared_ptr<Value>>{}, $4);
+    }
+    |   col NOT IN '(' dml ')'
+    {
+        $$ = std::make_shared<InExpr>($1, true, std::vector<std::shared_ptr<Value>>{}, $5);
+    }
     |   '(' condition ')'
     {
         $$ = $2;
@@ -509,6 +518,10 @@ expr_base:
     |   aggExpr
     {
         $$ = std::static_pointer_cast<Expr>($1);
+    }
+    |   CONCAT '(' expr_list ')'
+    {
+        $$ = std::make_shared<ConcatExpr>($3);
     }
     |   '(' dml ')'
     {
@@ -776,6 +789,17 @@ opt_asc_desc:
 set_knob_type:
         ENABLE_NESTLOOP  { $$ = EnableNestLoop; }
     |   ENABLE_SORTMERGE { $$ = EnableSortMerge; }
+    ;
+
+expr_list:
+        expr
+    {
+        $$ = std::vector<std::shared_ptr<Expr>>{$1};
+    }
+    |   expr_list ',' expr
+    {
+        $$.push_back($3);
+    }
     ;
 
 tbName: IDENTIFIER;

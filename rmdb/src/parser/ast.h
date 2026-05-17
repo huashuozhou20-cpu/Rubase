@@ -212,6 +212,14 @@ struct BoolLit : public Value {
 };
 
 /*
+ * ConcatExpr: CONCAT(expr, expr, ...) 字符串拼接
+ */
+struct ConcatExpr : public Expr {
+    std::vector<std::shared_ptr<Expr>> args;
+    ConcatExpr(std::vector<std::shared_ptr<Expr>> args_) : args(std::move(args_)) {}
+};
+
+/*
  * SubqueryExpr: 子查询表达式  (SELECT ...)
  */
 struct SubqueryExpr : public Expr {
@@ -350,9 +358,11 @@ struct InExpr : public CondExpr {
     std::shared_ptr<Col> col;
     bool not_in;
     std::vector<std::shared_ptr<Value>> values;
+    std::shared_ptr<TreeNode> subquery;  // IN (SELECT ...)
     InExpr(std::shared_ptr<Col> col_, bool not_in_,
-           std::vector<std::shared_ptr<Value>> values_)
-        : col(std::move(col_)), not_in(not_in_), values(std::move(values_)) {}
+           std::vector<std::shared_ptr<Value>> values_,
+           std::shared_ptr<TreeNode> subquery_ = nullptr)
+        : col(std::move(col_)), not_in(not_in_), values(std::move(values_)), subquery(std::move(subquery_)) {}
 };
 
 // ============================================================================

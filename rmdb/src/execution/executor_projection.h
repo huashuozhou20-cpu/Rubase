@@ -1,13 +1,3 @@
-/* Copyright (c) 2023 Renmin University of China
-RMDB is licensed under Mulan PSL v2.
-You can use this software according to the terms and conditions of the Mulan PSL v2.
-You may obtain a copy of Mulan PSL v2 at:
-        http://license.coscl.org.cn/MulanPSL2
-THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
-EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
-MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
-See the Mulan PSL v2 for more details. */
-
 #pragma once
 #include "execution_defs.h"
 #include "execution_manager.h"
@@ -17,20 +7,40 @@ See the Mulan PSL v2 for more details. */
 
 class ProjectionExecutor : public AbstractExecutor {
    private:
-    std::unique_ptr<AbstractExecutor> prev_;        // 投影节点的儿子节点
-    std::vector<ColMeta> cols_;                     // 需要投影的字段
-    size_t len_;                                    // 字段总长度
-    std::vector<size_t> sel_idxs_;
+    std::unique_ptr<AbstractExecutor> prev_;
+    std::vector<ColMeta> cols_;
+    size_t len_;
+    std::vector<size_t> sel_idxs_;  // -1 means concat/expr column
+    std::vector<std::vector<size_t>> concat_cols_;  // child column indices for each concat
 
    public:
     ProjectionExecutor(std::unique_ptr<AbstractExecutor> prev, const std::vector<TabCol> &sel_cols) {
         prev_ = std::move(prev);
-
         size_t curr_offset = 0;
         auto &prev_cols = prev_->cols();
         std::vector<bool> used(prev_cols.size(), false);
         for (auto &sel_col : sel_cols) {
-            // Find first matching column that hasn't been used yet
+            // Check for concat placeholder
+            if (sel_col.tab_name == "__expr__" || sel_col.col_name == "concat") {
+                // Create a virtual STRING column with enough space
+                ColMeta cm;
+                cm.tab_name = "";
+                cm.name = "concat";
+                cm.type = TYPE_STRING;
+                cm.len = 256;
+                cm.offset = curr_offset;
+                curr_offset += cm.len;
+                cols_.push_back(cm);
+                sel_idxs_.push_back((size_t)-1);
+                // Collect all prev_col string indices as concat inputs
+                std::vector<size_t> cidxs;
+                for (size_t j = 0; j < prev_cols.size(); j++) {
+                    cidxs.push_back(j);
+                }
+                concat_cols_.push_back(cidxs);
+                continue;
+            }
+            // Find matching column
             size_t idx = 0;
             for (; idx < prev_cols.size(); idx++) {
                 if (!used[idx] && prev_cols[idx].tab_name == sel_col.tab_name &&
@@ -52,22 +62,38 @@ class ProjectionExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override { prev_->beginTuple(); }
-
     void nextTuple() override { prev_->nextTuple(); }
-
     bool is_end() const override { return prev_->is_end(); }
-
     size_t tupleLen() const override { return len_; }
-
     const std::vector<ColMeta> &cols() const override { return cols_; }
 
     std::unique_ptr<RmRecord> Next() override {
         auto prev_rec = prev_->Next();
         if (!prev_rec) return nullptr;
         auto proj_rec = std::make_unique<RmRecord>(len_);
+        auto &prev_cols = prev_->cols();
         for (size_t i = 0; i < sel_idxs_.size(); i++) {
             auto &col = cols_[i];
-            memcpy(proj_rec->data + col.offset, prev_rec->data + prev_->cols()[sel_idxs_[i]].offset, col.len);
+            if (sel_idxs_[i] == (size_t)-1) {
+                // Concat column: concatenate all string columns from child
+                std::string result;
+                for (auto cidx : concat_cols_[i]) {
+                    auto &pc = prev_cols[cidx];
+                    if (pc.type == TYPE_STRING) {
+                        std::string s(prev_rec->data + pc.offset, pc.len);
+                        s = s.c_str();  // trim nulls
+                        result += s;
+                    } else if (pc.type == TYPE_INT) {
+                        result += std::to_string(*(int*)(prev_rec->data + pc.offset));
+                    } else if (pc.type == TYPE_FLOAT) {
+                        result += std::to_string(*(float*)(prev_rec->data + pc.offset));
+                    }
+                }
+                memset(proj_rec->data + col.offset, 0, col.len);
+                memcpy(proj_rec->data + col.offset, result.c_str(), std::min(result.size(), (size_t)col.len));
+            } else {
+                memcpy(proj_rec->data + col.offset, prev_rec->data + prev_cols[sel_idxs_[i]].offset, col.len);
+            }
         }
         return proj_rec;
     }

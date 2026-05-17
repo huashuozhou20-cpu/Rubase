@@ -58,6 +58,17 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
 
         std::vector<ColMeta> all_cols;
         get_all_cols(query->tables, all_cols);
+        // Add expression columns (CONCAT etc.) to projection
+        std::vector<bool> is_concat_col;
+        for (auto &e : x->exprs) {
+            if (std::dynamic_pointer_cast<ast::ConcatExpr>(e)) {
+                TabCol tc;
+                tc.col_name = "concat";
+                tc.tab_name = "__expr__";  // mark as expression
+                query->cols.push_back(tc);
+                is_concat_col.push_back(true);
+            }
+        }
         if (query->cols.empty()) {
             if (!query->has_agg && x->exprs.empty()) {
                 // select * : expand to all columns (only for non-aggregate, non-expression queries)
@@ -71,7 +82,8 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         } else {
             // infer table name from column name
             for (auto &sel_col : query->cols) {
-                sel_col = check_column(all_cols, sel_col);  // 列元数据校验
+                if (sel_col.tab_name != "__expr__")  // skip expression/virtual columns
+                    sel_col = check_column(all_cols, sel_col);
             }
         }
 

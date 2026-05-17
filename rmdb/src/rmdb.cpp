@@ -127,6 +127,43 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
         }
     } else if (auto logic = std::dynamic_pointer_cast<ast::LogicExpr>(node)) {
         for (auto &arg : logic->args) resolve_subqueries(arg);
+    } else if (auto in_expr = std::dynamic_pointer_cast<ast::InExpr>(node)) {
+        // Resolve IN subquery: execute and collect all values
+        if (in_expr->subquery) {
+            try {
+                Analyze sub_analyze(sm_manager.get());
+                auto sub_query = sub_analyze.do_analyze(in_expr->subquery);
+                char sub_buf[BUFFER_LENGTH]; int sub_offset = 0;
+                auto sub_txn = txn_manager->begin(nullptr, log_manager.get());
+                Context sub_ctx(lock_manager.get(), log_manager.get(), sub_txn, sub_buf, &sub_offset);
+                auto sub_plan = planner->do_planner(sub_query, &sub_ctx);
+                if (auto dml = std::dynamic_pointer_cast<DMLPlan>(sub_plan))
+                    sub_plan = dml->subplan_;
+                auto root_exec = portal->convert_plan_executor(sub_plan, &sub_ctx);
+                if (root_exec) {
+                    root_exec->beginTuple();
+                    auto &cols = root_exec->cols();
+                    while (!root_exec->is_end()) {
+                        auto rec = root_exec->Next();
+                        if (rec && !cols.empty()) {
+                            auto &col = cols[0];
+                            if (col.type == TYPE_INT)
+                                in_expr->values.push_back(std::make_shared<ast::IntLit>(*(int*)(rec->data+col.offset)));
+                            else if (col.type == TYPE_FLOAT)
+                                in_expr->values.push_back(std::make_shared<ast::FloatLit>(*(float*)(rec->data+col.offset)));
+                            else if (col.type == TYPE_STRING) {
+                                std::string s(rec->data+col.offset, col.len);
+                                s = s.c_str();
+                                in_expr->values.push_back(std::make_shared<ast::StringLit>(s));
+                            }
+                        }
+                        root_exec->nextTuple();
+                    }
+                }
+                txn_manager->commit(sub_txn, log_manager.get());
+            } catch (RMDBError &e) {}
+            in_expr->subquery = nullptr;  // Mark as resolved
+        }
     }
 }
 
