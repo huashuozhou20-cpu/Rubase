@@ -119,8 +119,8 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 "AUTO_INCREMENT" { return AUTO_INCREMENT; }
 "VIEW" { return VIEW; }
 "CONCAT" { return CONCAT; }
-"DATE" { return CHAR; }
-"TEXT" { return CHAR; }
+"DATE" { return DATE; }
+"TEXT" { return TEXT; }
 "UNIQUE" { return UNIQUE; }
 "ENABLE_NESTLOOP" { return ENABLE_NESTLOOP; }
 "ENABLE_SORTMERGE" { return ENABLE_SORTMERGE; }

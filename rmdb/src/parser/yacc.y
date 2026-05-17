@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT AS CONCAT VIEW UNIQUE
+%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT AS CONCAT VIEW UNIQUE DATE TEXT
 %token TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE
 %token AVG BETWEEN COUNT DISTINCT FULL GROUP HAVING IN INNER IS LEFT LIKE LIMIT
@@ -320,7 +320,15 @@ type:
     }
     |   CHAR
     {
-        // CHAR without length defaults to 256 bytes
+        // CHAR without length defaults to 4 bytes (1 char)
+        $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, 4);
+    }
+    |   DATE
+    {
+        $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, 256);
+    }
+    |   TEXT
+    {
         $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, 256);
     }
     |   FLOAT

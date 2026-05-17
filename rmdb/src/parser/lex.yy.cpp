@@ -1415,12 +1415,12 @@ YY_RULE_SETUP
 case 72:
 YY_RULE_SETUP
 #line 123 "lex.l"
-{ return CHAR; }
+{ return DATE; }
 	YY_BREAK
 case 73:
 YY_RULE_SETUP
 #line 124 "lex.l"
-{ return CHAR; }
+{ return TEXT; }
 	YY_BREAK
 case 74:
 YY_RULE_SETUP
