@@ -128,8 +128,9 @@ void *client_handler(void *sock_fd) {
 
         std::cout << "Read from client " << fd << ": " << data_recv << std::endl;
 
-        // Append to accumulation buffer for multi-line support
-        accum_buf += data_recv;
+        // Append to accumulation buffer for multi-line support (strip \r)
+        for (char *p = data_recv; *p; p++)
+            if (*p != '\r') accum_buf += *p;
 
         // Check if we have a complete statement (ends with ';')
         // Trim trailing whitespace for the check

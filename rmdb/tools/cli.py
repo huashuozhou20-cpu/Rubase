@@ -26,7 +26,7 @@ def main():
         first_line = True
         while True:
             try:
-                line = input(prompt).rstrip("\n")
+                line = input(prompt).rstrip("\r\n")
             except (EOFError, KeyboardInterrupt):
                 print("\nbye")
                 sock.close()
@@ -48,6 +48,7 @@ def main():
             prompt = "  ...> "
 
         sql = " ".join(lines).strip()
+        sql = sql.replace("\r", "")  # 清除复制粘贴带来的 \r
         if not sql:
             continue
 
