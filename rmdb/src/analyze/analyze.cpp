@@ -151,7 +151,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         get_clause(x->cond, query->conds);
         check_clause({x->tab_name}, query->conds);        
     } else if (auto x = std::dynamic_pointer_cast<ast::InsertStmt>(parse)) {
-        // 处理insert 的values值 (multi-row)
+        // 处理insert 的values值 (multi-row, optional column list)
         for (auto &row : x->vals_list) {
             std::vector<Value> vals;
             for (auto &sv_val : row) {
@@ -159,6 +159,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             }
             query->values_list.push_back(std::move(vals));
         }
+        query->col_names = x->col_names;
     } else {
         // do nothing
     }

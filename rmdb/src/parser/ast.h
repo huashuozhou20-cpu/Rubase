@@ -426,9 +426,11 @@ struct LimitClause : public TreeNode {
 
 struct InsertStmt : public TreeNode {
     std::string tab_name;
+    std::vector<std::string> col_names;  // optional column list
     std::vector<std::vector<std::shared_ptr<Value>>> vals_list;
-    InsertStmt(std::string tab_name_, std::vector<std::vector<std::shared_ptr<Value>>> vals_list_)
-        : tab_name(std::move(tab_name_)), vals_list(std::move(vals_list_)) {}
+    InsertStmt(std::string tab_name_, std::vector<std::string> col_names_,
+               std::vector<std::vector<std::shared_ptr<Value>>> vals_list_)
+        : tab_name(std::move(tab_name_)), col_names(std::move(col_names_)), vals_list(std::move(vals_list_)) {}
 };
 
 struct DeleteStmt : public TreeNode {

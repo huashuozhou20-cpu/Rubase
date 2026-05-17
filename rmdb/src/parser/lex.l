@@ -81,6 +81,8 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 "CHAR" { return CHAR; }
 "VARCHAR" { return CHAR; }
 "FLOAT" { return FLOAT; }
+"DECIMAL" { return FLOAT; }
+"NUMERIC" { return FLOAT; }
 "INDEX" { return INDEX; }
 "AND" { return AND; }
 "AVG" { return AVG; }

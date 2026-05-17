@@ -44,6 +44,8 @@ class Query{
     std::vector<Value> values;
     // multi-row INSERT values
     std::vector<std::vector<Value>> values_list;
+    // INSERT column list
+    std::vector<std::string> col_names;
     // select distinct
     bool has_distinct = false;
     // select 中有聚合函数

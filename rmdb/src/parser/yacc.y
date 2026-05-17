@@ -50,7 +50,7 @@ using namespace ast;
 %type <sv_vals> valueList
 %type <sv_vals_list> valueTupleList
 %type <sv_str> tbName colName
-%type <sv_strs> colNameList fromList
+%type <sv_strs> colNameList fromList optColList
 %type <sv_col> col
 %type <sv_cols> colList
 %type <sv_set_clause> setClause
@@ -162,9 +162,9 @@ ddl:
     ;
 
 dml:
-        INSERT INTO tbName VALUES valueTupleList
+        INSERT INTO tbName optColList VALUES valueTupleList
     {
-        $$ = std::make_shared<InsertStmt>($3, $5);
+        $$ = std::make_shared<InsertStmt>($3, $4, $6);
     }
     |   DELETE FROM tbName optWhereClause
     {
@@ -227,6 +227,17 @@ colNameList:
     }
     ;
 
+optColList:
+        /* empty */
+    {
+        $$ = std::vector<std::string>{};
+    }
+    |   '(' colNameList ')'
+    {
+        $$ = $2;
+    }
+    ;
+
 field:
         colName type
     {
@@ -257,6 +268,11 @@ type:
     }
     |   FLOAT
     {
+        $$ = std::make_shared<TypeLen>(SV_TYPE_FLOAT, sizeof(float));
+    }
+    |   FLOAT '(' VALUE_INT ',' VALUE_INT ')'
+    {
+        // DECIMAL(p,s) / NUMERIC(p,s): ignore precision/scale, store as FLOAT
         $$ = std::make_shared<TypeLen>(SV_TYPE_FLOAT, sizeof(float));
     }
     ;

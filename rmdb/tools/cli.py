@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RMDB 交互式命令行客户端 — 支持多行输入"""
+"""RMDB 交互式命令行客户端 — 支持多行输入、复制粘贴"""
 
 import socket
 import sys
@@ -17,22 +17,31 @@ def main():
         sys.exit(1)
 
     print("RMDB 客户端已连接。输入 SQL (以 ; 结尾)，输入 exit 退出。")
-    print("支持多行输入 — 直接回车换行，分号结束。\n")
+    print("支持多行输入和直接复制粘贴。\n")
 
     while True:
         # 累积多行输入，直到遇到分号
         lines = []
-        prompt = "rmdb> "
         first_line = True
         while True:
+            if first_line:
+                sys.stdout.write("rmdb> ")
+                sys.stdout.flush()
+
             try:
-                line = input(prompt).rstrip("\r\n")
+                line = sys.stdin.readline()
             except (EOFError, KeyboardInterrupt):
                 print("\nbye")
                 sock.close()
                 return
 
-            lines.append(line)
+            if not line:
+                # EOF
+                print("\nbye")
+                sock.close()
+                return
+
+            line = line.rstrip("\r\n")
 
             # exit 可以直接退出（不带分号也行）
             if first_line and line.strip().lower() in ("exit", "exit;"):
@@ -42,13 +51,14 @@ def main():
                 return
 
             first_line = False
+            lines.append(line)
+
             # 如果这一行包含分号，输入结束
             if ";" in line:
                 break
-            prompt = "  ...> "
 
         sql = " ".join(lines).strip()
-        sql = sql.replace("\r", "")  # 清除复制粘贴带来的 \r
+        sql = sql.replace("\r", "")
         if not sql:
             continue
 
@@ -70,7 +80,7 @@ def main():
         if text.strip():
             print(text.rstrip())
 
-        # 只有失败时才显示 FAIL，成功不显示任何标记
+        # 只有失败时才显示 FAIL
         if "error" in text.lower() or "failure" in text.lower():
             print("  FAIL")
 

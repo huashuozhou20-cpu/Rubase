@@ -106,7 +106,7 @@ class Portal
                 case T_Insert:
                 {
                     std::unique_ptr<AbstractExecutor> root =
-                            std::make_unique<InsertExecutor>(sm_manager_, x->tab_name_, x->values_list_, context);
+                            std::make_unique<InsertExecutor>(sm_manager_, x->tab_name_, x->values_list_, x->col_names_, context);
 
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }

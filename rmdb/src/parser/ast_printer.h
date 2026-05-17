@@ -254,6 +254,9 @@ private:
         else if (auto x = std::dynamic_pointer_cast<InsertStmt>(node)) {
             std::cout << "INSERT\n";
             print_val(x->tab_name, offset);
+            if (!x->col_names.empty()) {
+                for (auto &c : x->col_names) print_val(c, offset);
+            }
             for (auto &row : x->vals_list) {
                 print_node_list(row, offset);
             }
