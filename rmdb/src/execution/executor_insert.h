@@ -55,20 +55,11 @@ class InsertExecutor : public AbstractExecutor {
         fh_ = sm_manager_->fhs_.at(tab_name).get();
         context_ = context;
 
-        // Find AUTO_INCREMENT columns and compute starting values
+        // Find AUTO_INCREMENT columns and use cached next value
         auto_inc_next_.resize(tab_.cols.size(), -1);
         for (size_t ci = 0; ci < tab_.cols.size(); ci++) {
             if (tab_.cols[ci].auto_increment && tab_.cols[ci].type == TYPE_INT) {
-                // Scan table to find max value
-                int max_val = 0;
-                RmScan scan(fh_);
-                while (!scan.is_end()) {
-                    auto rec = fh_->get_record(scan.rid(), context_);
-                    int val = *(int *)(rec->data + tab_.cols[ci].offset);
-                    if (val > max_val) max_val = val;
-                    scan.next();
-                }
-                auto_inc_next_[ci] = max_val + 1;
+                auto_inc_next_[ci] = tab_.next_auto_inc;
             }
         }
     };
@@ -154,6 +145,13 @@ class InsertExecutor : public AbstractExecutor {
                 }
                 ih->insert_entry(key, rid_, context_->txn_);
                 delete[] key;
+            }
+        }
+        // Update cached AUTO_INCREMENT value
+        for (size_t ci = 0; ci < tab_.cols.size(); ci++) {
+            if (auto_inc_next_[ci] > 0) {
+                tab_.next_auto_inc = auto_inc_next_[ci];
+                break;
             }
         }
         return nullptr;

@@ -82,11 +82,13 @@ struct TabMeta {
     std::string name;                   // 表名称
     std::vector<ColMeta> cols;          // 表包含的字段
     std::vector<IndexMeta> indexes;     // 表上建立的索引
+    int next_auto_inc = 1;              // cached AUTO_INCREMENT value
 
     TabMeta(){}
 
     TabMeta(const TabMeta &other) {
         name = other.name;
+        next_auto_inc = other.next_auto_inc;
         for(auto col : other.cols) cols.push_back(col);
     }
 
@@ -139,12 +141,13 @@ struct TabMeta {
     friend std::ostream &operator<<(std::ostream &os, const TabMeta &tab) {
         os << tab.name << '\n' << tab.cols.size() << '\n';
         for (auto &col : tab.cols) {
-            os << col << '\n';  // col是ColMeta类型，然后调用重载的ColMeta的操作符<<
+            os << col << '\n';
         }
         os << tab.indexes.size() << "\n";
         for (auto &index : tab.indexes) {
             os << index << "\n";
         }
+        os << tab.next_auto_inc << '\n';
         return os;
     }
 
@@ -162,6 +165,7 @@ struct TabMeta {
             is >> index;
             tab.indexes.push_back(index);
         }
+        if (is >> tab.next_auto_inc) {} else tab.next_auto_inc = 1;
         return is;
     }
 };
