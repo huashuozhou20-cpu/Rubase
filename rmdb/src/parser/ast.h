@@ -212,6 +212,14 @@ struct BoolLit : public Value {
 };
 
 /*
+ * SubqueryExpr: 子查询表达式  (SELECT ...)
+ */
+struct SubqueryExpr : public Expr {
+    std::shared_ptr<TreeNode> subquery;
+    SubqueryExpr(std::shared_ptr<TreeNode> sub) : subquery(std::move(sub)) {}
+};
+
+/*
  * NullLit: NULL 字面量
  *   为什么是一个独立节点而不是在 Value 中加个 is_null 字段？
  *     1. SQL 中 NULL 是类型无关的——可以出现在任何需要值的地方

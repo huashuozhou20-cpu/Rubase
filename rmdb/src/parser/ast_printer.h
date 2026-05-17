@@ -218,6 +218,12 @@ private:
             }
         }
 
+        // Subquery expression
+        else if (auto x = std::dynamic_pointer_cast<SubqueryExpr>(node)) {
+            std::cout << "SUBQUERY_EXPR\n";
+            print_node(x->subquery, offset);
+        }
+
         // Condition expressions
         else if (auto x = std::dynamic_pointer_cast<BinaryExpr>(node)) {
             std::cout << "BINARY_EXPR\n";

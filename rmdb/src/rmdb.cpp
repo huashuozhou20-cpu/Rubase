@@ -23,6 +23,7 @@ See the Mulan PSL v2 for more details. */
 #include "optimizer/planner.h"
 #include "portal.h"
 #include "analyze/analyze.h"
+#include "execution/executor_abstract.h"
 
 #define SOCK_PORT 8765
 #define MAX_CONN_LIMIT 8
@@ -76,6 +77,68 @@ static int send_result_to_client(int fd, const char *data, int len) {
         total += sent;
     }
     return total;
+}
+
+// Resolve scalar subqueries in AST condition tree by executing them
+// and replacing SubqueryExpr with literal values.
+void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
+    if (!node) return;
+    // Process condition expressions recursively
+    if (auto binary = std::dynamic_pointer_cast<ast::BinaryExpr>(node)) {
+        resolve_subqueries(binary->lhs);
+        if (auto sub = std::dynamic_pointer_cast<ast::SubqueryExpr>(binary->rhs)) {
+            // Execute subquery and get scalar value — use a COPY to avoid modifying original
+            auto sub_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(sub->subquery);
+            if (!sub_stmt) return;
+            auto sub_copy = std::make_shared<ast::SelectStmt>();
+            sub_copy->tabs = sub_stmt->tabs;
+            sub_copy->cols = sub_stmt->cols;
+            sub_copy->aggs = sub_stmt->aggs;
+            sub_copy->exprs = sub_stmt->exprs;
+            sub_copy->joins = sub_stmt->joins;
+            sub_copy->cond = sub_stmt->cond;
+            sub_copy->group_by = sub_stmt->group_by;
+            sub_copy->having = sub_stmt->having;
+            sub_copy->order = sub_stmt->order;
+            sub_copy->limit = sub_stmt->limit;
+            sub_copy->has_distinct = sub_stmt->has_distinct;
+            sub_copy->is_agg = sub_stmt->is_agg;
+            Analyze sub_analyze(sm_manager.get());
+            std::shared_ptr<Query> sub_query;
+            try {
+                sub_query = sub_analyze.do_analyze(sub_copy);
+            } catch (RMDBError &e) {
+                std::cerr << "Subquery analyze error: " << e.what() << std::endl;
+                return;
+            }
+            Context sub_ctx(lock_manager.get(), log_manager.get(), nullptr, nullptr, nullptr);
+            auto sub_plan = planner->do_planner(sub_query, &sub_ctx);
+            // Build executor tree via portal
+            auto root_exec = portal->convert_plan_executor(sub_plan, &sub_ctx);
+            // Execute and extract scalar
+            try {
+                root_exec->beginTuple();
+                if (!root_exec->is_end()) {
+                    auto rec = root_exec->Next();
+                    auto &cols = root_exec->cols();
+                    float val = 0;
+                    if (!cols.empty()) {
+                        auto &col = cols[0];
+                        if (col.type == TYPE_INT)
+                            val = (float)*(int *)(rec->data + col.offset);
+                        else if (col.type == TYPE_FLOAT)
+                            val = *(float *)(rec->data + col.offset);
+                    }
+                    binary->rhs = std::make_shared<ast::FloatLit>(val);
+                }
+            } catch (RMDBError &e) {
+            }
+        } else {
+            resolve_subqueries(binary->rhs);
+        }
+    } else if (auto logic = std::dynamic_pointer_cast<ast::LogicExpr>(node)) {
+        for (auto &arg : logic->args) resolve_subqueries(arg);
+    }
 }
 
 void *client_handler(void *sock_fd) {
@@ -188,6 +251,7 @@ void *client_handler(void *sock_fd) {
             if (yyparse() == 0) {
                 if (ast::parse_tree != nullptr) {
                     try {
+                        // TODO: resolve_subqueries(ast::parse_tree);
                         // analyze and rewrite
                         std::shared_ptr<Query> query = analyze->do_analyze(ast::parse_tree);
                         yy_delete_buffer(buf);

@@ -276,14 +276,17 @@ void Analyze::get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector
                 c.lhs_col = {.tab_name = "", .col_name = ""};
             }
             c.op = convert_sv_comp_op(binary->op);
+            bool valid = false;
             if (auto rhs_val = std::dynamic_pointer_cast<ast::Value>(binary->rhs)) {
                 c.is_rhs_val = true;
                 c.rhs_val = convert_sv_value(rhs_val);
+                valid = true;
             } else if (auto rhs_col = std::dynamic_pointer_cast<ast::Col>(binary->rhs)) {
                 c.is_rhs_val = false;
                 c.rhs_col = {.tab_name = rhs_col->tab_name, .col_name = rhs_col->col_name};
+                valid = true;
             }
-            out.push_back(c);
+            if (valid) out.push_back(c);
         } else if (auto unary = std::dynamic_pointer_cast<ast::UnaryCondExpr>(node)) {
             Condition c;
             c.lhs_col = {.tab_name = unary->col->tab_name, .col_name = unary->col->col_name};

@@ -510,6 +510,10 @@ expr_base:
     {
         $$ = std::static_pointer_cast<Expr>($1);
     }
+    |   '(' dml ')'
+    {
+        $$ = std::make_shared<SubqueryExpr>($2);
+    }
     |   '(' expr ')'
     {
         $$ = $2;
