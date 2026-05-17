@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT
+%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT
 %token TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE
 %token AVG BETWEEN COUNT DISTINCT FULL GROUP HAVING IN INNER IS LEFT LIKE LIMIT
@@ -254,6 +254,31 @@ field:
     |   colName type NOT VALUE_NULL DEFAULT value
     {
         $$ = std::make_shared<ColDef>($1, $2, true, $6);
+    }
+    |   colName type PRIMARY KEY
+    {
+        auto col = std::make_shared<ColDef>($1, $2, true, nullptr);
+        col->primary_key_ = true;
+        $$ = col;
+    }
+    |   colName type AUTO_INCREMENT
+    {
+        auto col = std::make_shared<ColDef>($1, $2, false, nullptr);
+        col->auto_increment_ = true;
+        $$ = col;
+    }
+    |   colName type NOT VALUE_NULL AUTO_INCREMENT
+    {
+        auto col = std::make_shared<ColDef>($1, $2, true, nullptr);
+        col->auto_increment_ = true;
+        $$ = col;
+    }
+    |   colName type PRIMARY KEY AUTO_INCREMENT
+    {
+        auto col = std::make_shared<ColDef>($1, $2, true, nullptr);
+        col->primary_key_ = true;
+        col->auto_increment_ = true;
+        $$ = col;
     }
     ;
 

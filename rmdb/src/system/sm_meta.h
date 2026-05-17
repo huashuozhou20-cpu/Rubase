@@ -28,12 +28,14 @@ struct ColMeta {
     int offset;             // 字段位于记录中的偏移量
     bool index;             /** unused */
     bool not_null = false;  // NOT NULL constraint
+    bool primary_key = false;  // PRIMARY KEY
+    bool auto_increment = false;  // AUTO_INCREMENT
     bool has_default = false;
     std::string default_val;  // DEFAULT value (single token, no spaces)
 
     friend std::ostream &operator<<(std::ostream &os, const ColMeta &col) {
         os << col.tab_name << ' ' << col.name << ' ' << col.type << ' ' << col.len << ' ' << col.offset << ' '
-           << col.index << ' ' << col.not_null << ' ' << col.has_default;
+           << col.index << ' ' << col.not_null << ' ' << col.primary_key << ' ' << col.auto_increment << ' ' << col.has_default;
         if (col.has_default) {
             os << ' ' << col.default_val;
         }
@@ -41,7 +43,7 @@ struct ColMeta {
     }
 
     friend std::istream &operator>>(std::istream &is, ColMeta &col) {
-        is >> col.tab_name >> col.name >> col.type >> col.len >> col.offset >> col.index >> col.not_null >> col.has_default;
+        is >> col.tab_name >> col.name >> col.type >> col.len >> col.offset >> col.index >> col.not_null >> col.primary_key >> col.auto_increment >> col.has_default;
         if (col.has_default) {
             is >> col.default_val;
         }

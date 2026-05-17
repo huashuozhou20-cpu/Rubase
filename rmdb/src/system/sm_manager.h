@@ -23,6 +23,8 @@ struct ColDef {
     ColType type;      // Type of column
     int len;           // Length of column
     bool not_null = false;
+    bool primary_key = false;
+    bool auto_increment = false;
     bool has_default = false;
     std::string default_val;  // string representation of default value
 };

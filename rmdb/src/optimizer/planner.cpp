@@ -426,7 +426,9 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
                 ColDef col_def = {.name = sv_col_def->col_name,
                                   .type = interp_sv_type(sv_col_def->type_len->type),
                                   .len = sv_col_def->type_len->len,
-                                  .not_null = sv_col_def->not_null_};
+                                  .not_null = sv_col_def->not_null_ || sv_col_def->primary_key_,
+                                  .primary_key = sv_col_def->primary_key_,
+                                  .auto_increment = sv_col_def->auto_increment_};
                 if (sv_col_def->default_val_) {
                     col_def.has_default = true;
                     col_def.default_val = ast_value_to_string(sv_col_def->default_val_);

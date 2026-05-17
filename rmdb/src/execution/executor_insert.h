@@ -25,6 +25,7 @@ class InsertExecutor : public AbstractExecutor {
     Rid rid_;
     SmManager *sm_manager_;
     size_t current_row_ = 0;
+    std::vector<int> auto_inc_next_;  // next AUTO_INCREMENT value per column (-1 = not auto_inc)
 
     // Build a mapping from column name to index in the table
     std::map<std::string, int> col_name_to_idx_;
@@ -53,6 +54,23 @@ class InsertExecutor : public AbstractExecutor {
         }
         fh_ = sm_manager_->fhs_.at(tab_name).get();
         context_ = context;
+
+        // Find AUTO_INCREMENT columns and compute starting values
+        auto_inc_next_.resize(tab_.cols.size(), -1);
+        for (size_t ci = 0; ci < tab_.cols.size(); ci++) {
+            if (tab_.cols[ci].auto_increment && tab_.cols[ci].type == TYPE_INT) {
+                // Scan table to find max value
+                int max_val = 0;
+                RmScan scan(fh_);
+                while (!scan.is_end()) {
+                    auto rec = fh_->get_record(scan.rid(), context_);
+                    int val = *(int *)(rec->data + tab_.cols[ci].offset);
+                    if (val > max_val) max_val = val;
+                    scan.next();
+                }
+                auto_inc_next_[ci] = max_val + 1;
+            }
+        }
     };
 
     std::unique_ptr<RmRecord> Next() override {
@@ -62,29 +80,46 @@ class InsertExecutor : public AbstractExecutor {
             RmRecord rec(fh_->get_file_hdr().record_size);
             memset(rec.data, 0, fh_->get_file_hdr().record_size);
 
+            // Track which columns were explicitly set
+            std::vector<bool> col_set(tab_.cols.size(), false);
+
             // Map values to table columns
             for (size_t vi = 0; vi < row_vals.size(); vi++) {
                 auto &val = row_vals[vi];
+                int col_idx;
                 ColMeta *col;
                 if (col_names_.empty()) {
-                    // Default: values are in table column order
+                    col_idx = (int)vi;
                     col = &tab_.cols[vi];
                 } else {
-                    // Column list provided: look up column by name
                     auto it = col_name_to_idx_.find(col_names_[vi]);
                     if (it == col_name_to_idx_.end()) {
                         throw RMDBError("Column '" + col_names_[vi] + "' not found in table '" + tab_name_ + "'");
                     }
-                    col = &tab_.cols[it->second];
+                    col_idx = it->second;
+                    col = &tab_.cols[col_idx];
                 }
-                if (col->type != val.type) {
+                col_set[col_idx] = true;
+                if (col->type != val.type && !val.is_null_) {
                     throw IncompatibleTypeError(coltype2str(col->type), coltype2str(val.type));
                 }
                 if (col->not_null && val.is_null_) {
                     throw RMDBError("Column '" + col->name + "' cannot be NULL");
                 }
+                // AUTO_INCREMENT: replace NULL with next value
+                if (val.is_null_ && auto_inc_next_[col_idx] > 0) {
+                    val.set_int(auto_inc_next_[col_idx]++);
+                    val.is_null_ = false;
+                }
                 val.init_raw(col->len);
                 memcpy(rec.data + col->offset, val.raw->data, col->len);
+            }
+            // Fill AUTO_INCREMENT values for unspecified columns
+            for (size_t ci = 0; ci < tab_.cols.size(); ci++) {
+                if (!col_set[ci] && auto_inc_next_[ci] > 0) {
+                    int val = auto_inc_next_[ci]++;
+                    memcpy(rec.data + tab_.cols[ci].offset, &val, sizeof(int));
+                }
             }
             // Insert into record file
             rid_ = fh_->insert_record(rec.data, context_);

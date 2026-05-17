@@ -151,6 +151,8 @@ struct ColDef : public Field {
     std::string col_name;
     std::shared_ptr<TypeLen> type_len;
     bool not_null_;
+    bool primary_key_ = false;
+    bool auto_increment_ = false;
     std::shared_ptr<Value> default_val_;  // DEFAULT value (nullptr if none)
     ColDef(std::string col_name_, std::shared_ptr<TypeLen> type_len_,
            bool not_null_ = false, std::shared_ptr<Value> default_val_ = nullptr)

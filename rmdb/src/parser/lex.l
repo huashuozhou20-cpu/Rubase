@@ -113,6 +113,9 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 "ORDER" { return ORDER; }
 "BY" {  return BY;  }
 "ASC" { return ASC; }
+"PRIMARY" { return PRIMARY; }
+"KEY" { return KEY; }
+"AUTO_INCREMENT" { return AUTO_INCREMENT; }
 "ENABLE_NESTLOOP" { return ENABLE_NESTLOOP; }
 "ENABLE_SORTMERGE" { return ENABLE_SORTMERGE; }
 "TRUE" { 

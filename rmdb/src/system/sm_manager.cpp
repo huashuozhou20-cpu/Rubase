@@ -173,7 +173,7 @@ void SmManager::show_tables(Context* context) {
 void SmManager::desc_table(const std::string& tab_name, Context* context) {
     TabMeta &tab = db_.get_table(tab_name);
 
-    std::vector<std::string> captions = {"Field", "Type", "Null", "Default", "Index"};
+    std::vector<std::string> captions = {"Field", "Type", "Null", "Default", "Key"};
     RecordPrinter printer(captions.size());
     // Print header
     printer.print_separator(context);
@@ -182,18 +182,18 @@ void SmManager::desc_table(const std::string& tab_name, Context* context) {
     // Write header to file
     std::fstream outfile;
     outfile.open("output.txt", std::ios::out | std::ios::app);
-    outfile << "| Field | Type | Null | Default | Index |\n";
+    outfile << "| Field | Type | Null | Default | Key |\n";
     // Print fields
     for (auto &col : tab.cols) {
         std::string def_str = col.has_default ? col.default_val : "NULL";
+        std::string key_str = col.primary_key ? "PRI" : (col.index ? "MUL" : "");
         std::vector<std::string> field_info = {col.name, coltype2str(col.type),
                                                col.not_null ? "NO" : "YES",
-                                               def_str,
-                                               col.index ? "YES" : "NO"};
+                                               def_str, key_str};
         printer.print_record(field_info, context);
         outfile << "| " << col.name << " | " << coltype2str(col.type) << " | "
                 << (col.not_null ? "NO" : "YES") << " | " << def_str << " | "
-                << (col.index ? "YES" : "NO") << " |\n";
+                << key_str << " |\n";
     }
     // Print footer
     printer.print_separator(context);
@@ -222,10 +222,34 @@ void SmManager::create_table(const std::string& tab_name, const std::vector<ColD
                        .offset = curr_offset,
                        .index = false,
                        .not_null = col_def.not_null,
+                       .primary_key = col_def.primary_key,
+                       .auto_increment = col_def.auto_increment,
                        .has_default = col_def.has_default,
                        .default_val = col_def.default_val};
         curr_offset += col_def.len;
         tab.cols.push_back(col);
+    }
+    // Create unique indexes for PRIMARY KEY columns
+    for (auto &col_def : col_defs) {
+        if (col_def.primary_key) {
+            std::vector<ColMeta> pk_cols;
+            for (auto &c : tab.cols) {
+                if (c.name == col_def.name) {
+                    pk_cols.push_back(c);
+                    break;
+                }
+            }
+            ix_manager_->create_index(tab_name, pk_cols);
+            auto ix_name = ix_manager_->get_index_name(tab_name, pk_cols);
+            ihs_.emplace(ix_name, ix_manager_->open_index(tab_name, pk_cols));
+            // Register index in table metadata
+            IndexMeta idx_meta;
+            idx_meta.tab_name = tab_name;
+            idx_meta.col_num = 1;
+            idx_meta.col_tot_len = col_def.len;
+            idx_meta.cols = pk_cols;
+            tab.indexes.push_back(idx_meta);
+        }
     }
     // Create & open record file
     int record_size = curr_offset;  // record_size就是col meta所占的大小（表的元数据也是以记录的形式进行存储的）
