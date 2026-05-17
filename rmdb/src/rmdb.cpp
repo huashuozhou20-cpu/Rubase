@@ -227,6 +227,19 @@ void *client_handler(void *sock_fd) {
                         outfile.close();
                     }
                 }
+            } else {
+                // Parser error: send failure to client
+                yy_delete_buffer(buf);
+                finish_analyze = true;
+                pthread_mutex_unlock(buffer_mutex);
+                std::string err = "Parser Error: syntax error\n";
+                memcpy(data_send, err.c_str(), err.length());
+                offset = err.length();
+                // Write to output.txt
+                std::fstream outfile;
+                outfile.open("output.txt", std::ios::out | std::ios::app);
+                outfile << "parser error\n";
+                outfile.close();
             }
             if(finish_analyze == false) {
                 yy_delete_buffer(buf);
