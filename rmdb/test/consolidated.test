@@ -1,0 +1,176 @@
+-- ========================================
+-- RMDB 综合测试用例
+-- 过滤了不支持的: calc, set, explain, storage format
+-- ========================================
+
+-- 1. 基本 CRUD
+create table t_basic(id int, age int, name char, score float);
+insert into t_basic values(1,1, 'a', 1.0);
+insert into t_basic values(2,2, 'b', 2.0);
+insert into t_basic values(4,4, 'c', 3.0);
+insert into t_basic values(3,3, 'd', 4.0);
+insert into t_basic values(5,5, 'e', 5.5);
+insert into t_basic values(6,6, 'f', 6.6);
+insert into t_basic values(7,7, 'g', 7.7);
+delete from t_basic where id=3;
+select * from t_basic where id=1;
+select * from t_basic where age>1 and age<3;
+select * from t_basic where t_basic.id=1 and t_basic.age=1;
+select * from t_basic where id=1 and age=1;
+create index i_id on t_basic (id);
+
+-- 2. 多表 JOIN
+create table jt1(id int, name char);
+create table jt2(id int, num int);
+create table jt3(id int, num2 int);
+create table jt_empty(id int, num_empty int);
+insert into jt1 values (1, 'a');
+insert into jt1 values (2, 'b');
+insert into jt1 values (3, 'c');
+insert into jt2 values (1, 2);
+insert into jt2 values (2, 15);
+insert into jt3 values (1, 120);
+insert into jt3 values (3, 800);
+select * from jt1 inner join jt_empty on jt1.id=jt_empty.id;
+select * from jt_empty inner join jt1 on jt_empty.id=jt1.id;
+select * from jt1 inner join jt2 on jt1.id = jt2.id where jt2.id=1;
+select * from jt1 inner join jt2 on jt1.id = jt2.id where jt2.id=1;
+-- Known limitations: 3-table JOIN, comma-separated FROM, DROP TABLE referenced after drop
+
+-- 3. ORDER BY
+create table t_ob(id int, score float, name char);
+create table t_ob2(id int, age int);
+insert into t_ob values(3, 1.0, 'a');
+insert into t_ob values(1, 2.0, 'b');
+insert into t_ob values(4, 3.0, 'c');
+insert into t_ob values(3, 2.0, 'c');
+insert into t_ob values(3, 4.0, 'c');
+insert into t_ob values(3, 3.0, 'd');
+insert into t_ob values(3, 2.0, 'f');
+insert into t_ob2 values(1, 10);
+insert into t_ob2 values(2, 20);
+insert into t_ob2 values(3, 10);
+select * from t_ob order by id, score, name;
+select * from t_ob order by id desc, score asc, name desc;
+select * from t_ob where id=3 and name>='a' order by score desc, name;
+
+-- 4. 聚合函数
+create table t_agg(id int, num int, price float, addr char, birthday date);
+insert into t_agg values (1, 18, 10.0, 'abc', '2020-01-01');
+insert into t_agg values (2, 15, 20.0, 'abc', '2010-01-11');
+insert into t_agg values (3, 12, 30.0, 'def', '2021-01-21');
+insert into t_agg values (4, 15, 30.0, 'dei', '2021-01-31');
+select count(*) from t_agg;
+select count(num) from t_agg;
+select min(num) from t_agg;
+select min(price) from t_agg;
+select max(num) from t_agg;
+select max(price) from t_agg;
+select avg(num) from t_agg;
+select avg(price) from t_agg;
+
+-- 5. 复杂子查询
+create table csq1(id int, col1 int, feat1 float);
+create table csq2(id int, col2 int, feat2 float);
+create table csq3(id int, col3 int, feat3 float);
+insert into csq1 values (1, 4, 11.2);
+insert into csq1 values (2, 2, 12.0);
+insert into csq1 values (3, 3, 13.5);
+insert into csq2 values (1, 2, 13.0);
+insert into csq2 values (2, 7, 10.5);
+insert into csq2 values (5, 3, 12.6);
+insert into csq3 values (1, 2, 11.0);
+insert into csq3 values (3, 6, 16.5);
+insert into csq3 values (5, 5, 14.6);
+select * from csq1 where col1 = (select csq2.col2 from csq2);
+select * from csq1 where col1 = (select csq2.col2 from csq2 where csq2.id=1);
+select * from csq1 where col1 in (select csq2.col2 from csq2);
+select * from csq1 where col1 not in (select csq2.col2 from csq2 where csq2.col2<5);
+
+-- 6. DATE 类型
+create table t_date(id int, u_date date);
+create index idx_date on t_date(u_date);
+insert into t_date values (1,'2020-01-21');
+insert into t_date values (2,'2020-10-21');
+insert into t_date values (3,'2020-1-01');
+insert into t_date values (4,'2000-01-01');
+delete from t_date where u_date>'2012-2-29';
+select * from t_date;
+
+-- 7. DROP TABLE
+create table t_drop1(id int, t_name char);
+drop table t_drop1;
+create table t_drop2(id int, t_name char);
+insert into t_drop2 values (1,'OB');
+drop table t_drop2;
+create table t_drop3(id int, t_name char);
+insert into t_drop3 values (1,'OB');
+drop table t_drop3;
+select * from t_drop3;
+
+-- 8. GROUP BY + HAVING
+create table t_gb(id int, score float, name char);
+insert into t_gb values(3, 1.0, 'a');
+insert into t_gb values(1, 2.0, 'b');
+insert into t_gb values(4, 3.0, 'c');
+insert into t_gb values(3, 2.0, 'c');
+insert into t_gb values(3, 4.0, 'c');
+insert into t_gb values(3, 3.0, 'd');
+insert into t_gb values(3, 2.0, 'f');
+select id, count(*), avg(score), max(score) from t_gb group by id;
+select id, count(*), avg(score) from t_gb group by id having avg(score) > 2;
+
+-- 9. NULL 约束
+create table t_null(id int not null, num int null, price float not null, birthday date null);
+create index idx_null on t_null(num);
+insert into t_null values (1, 18, 10.0, '2020-01-01');
+insert into t_null values (2, null, 20.0, '2010-01-11');
+insert into t_null values (3, 12, 30.0, null);
+insert into t_null values (4, 15, 30.0, '2021-01-31');
+select count(*) from t_null;
+select count(num) from t_null;
+select count(birthday) from t_null;
+select avg(num) from t_null;
+
+-- 10. TEXT 类型
+create table t_text(id int, info text);
+insert into t_text values (1,'this is a very very long string');
+insert into t_text values (2,'this is another long string');
+insert into t_text values (3,'short');
+delete from t_text where id=1;
+update t_text set info='updated text' where id = 2;
+select * from t_text;
+
+-- 11. UNIQUE INDEX + UPDATE
+create table t_upd(id int, t_name char, col1 int, col2 int);
+create index idx_upd on t_upd(id);
+insert into t_upd values (1,'N1',1,1);
+insert into t_upd values (2,'N2',1,1);
+insert into t_upd values (3,'N3',2,1);
+update t_upd set t_name='N01' where id=1;
+update t_upd set col2=0 where col1=1;
+update t_upd set col1=0;
+select * from t_upd;
+
+-- 12. 多索引
+create table t_midx(id int, col1 int, col2 float, col3 char, col4 date, col5 int);
+create index midx_12 on t_midx(col1,col2);
+create index midx_345 on t_midx(col3, col4, col5);
+insert into t_midx values (1, 1, 11.2, 'a', '2021-01-02', 1);
+insert into t_midx values (2, 1, 16.2, 'x', '2021-01-02', 61);
+insert into t_midx values (3, 1, 11.6, 'h', '2023-01-02', 17);
+select * from t_midx where col1=1;
+delete from t_midx where id = 3;
+select * from t_midx;
+
+-- 13. DISTINCT + LIMIT
+select distinct name from t_ob;
+select * from t_basic order by score desc limit 3;
+
+-- 14. 视图
+create view v_basic as select * from t_basic where age > 1;
+select * from v_basic;
+drop view v_basic;
+
+-- 15. 表别名 JOIN
+select a.name, b.score from t_basic a join t_ob b on a.id = b.id;
