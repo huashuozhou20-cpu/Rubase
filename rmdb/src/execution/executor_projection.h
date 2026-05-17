@@ -28,10 +28,22 @@ class ProjectionExecutor : public AbstractExecutor {
 
         size_t curr_offset = 0;
         auto &prev_cols = prev_->cols();
+        std::vector<bool> used(prev_cols.size(), false);
         for (auto &sel_col : sel_cols) {
-            auto pos = get_col(prev_cols, sel_col);
-            sel_idxs_.push_back(pos - prev_cols.begin());
-            auto col = *pos;
+            // Find first matching column that hasn't been used yet
+            size_t idx = 0;
+            for (; idx < prev_cols.size(); idx++) {
+                if (!used[idx] && prev_cols[idx].tab_name == sel_col.tab_name &&
+                    prev_cols[idx].name == sel_col.col_name) {
+                    used[idx] = true;
+                    break;
+                }
+            }
+            if (idx == prev_cols.size()) {
+                throw ColumnNotFoundError(sel_col.tab_name + '.' + sel_col.col_name);
+            }
+            sel_idxs_.push_back(idx);
+            auto col = prev_cols[idx];
             col.offset = curr_offset;
             curr_offset += col.len;
             cols_.push_back(col);

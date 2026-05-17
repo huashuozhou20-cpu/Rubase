@@ -104,6 +104,17 @@ class AggregationExecutor : public AbstractExecutor {
         return v;
     }
 
+    static std::string agg_type_name(ast::AggType t) {
+        switch (t) {
+            case ast::AGG_COUNT: return "COUNT";
+            case ast::AGG_SUM:   return "SUM";
+            case ast::AGG_AVG:   return "AVG";
+            case ast::AGG_MAX:   return "MAX";
+            case ast::AGG_MIN:   return "MIN";
+        }
+        return "UNKNOWN";
+    }
+
     void accumulate(AggregateState &state, const char *data, ColType type) {
         state.count++;
         double val = 0.0;

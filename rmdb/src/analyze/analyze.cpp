@@ -349,6 +349,10 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
             }
             default: {  // regular comparison: EQ, NE, LT, GT, LE, GE
                 if (cond.is_rhs_val) {
+                    // Allow INT→FLOAT implicit conversion
+                    if (lhs_type == TYPE_FLOAT && cond.rhs_val.type == TYPE_INT) {
+                        cond.rhs_val.set_float((float)cond.rhs_val.int_val);
+                    }
                     cond.rhs_val.init_raw(lhs_col->len);
                     if (lhs_type != cond.rhs_val.type) {
                         throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(cond.rhs_val.type));
