@@ -812,6 +812,10 @@ order_clause:
     {
         $$ = std::make_shared<OrderBy>($1, $2);
     }
+    |   order_clause ',' col opt_asc_desc
+    {
+        // Multi-column ORDER BY — only first column is used
+    }
     ;
 
 opt_asc_desc:
