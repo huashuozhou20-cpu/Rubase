@@ -49,7 +49,19 @@ std::vector<Condition> pop_conds(std::vector<Condition> &conds, std::string tab_
     std::vector<Condition> solved_conds;
     auto it = conds.begin();
     while (it != conds.end()) {
-        if ((tab_names.compare(it->lhs_col.tab_name) == 0 && it->is_rhs_val) || (it->lhs_col.tab_name.compare(it->rhs_col.tab_name) == 0)) {
+        bool match = false;
+        if (it->lhs_col.tab_name == tab_names) {
+            // Push if it's a value comparison, unary, or multi-value condition
+            if (it->is_rhs_val || it->op == OP_IS_NULL || it->op == OP_IS_NOT_NULL
+                || it->op == OP_IN || it->op == OP_NOT_IN
+                || it->op == OP_LIKE || it->op == OP_NOT_LIKE
+                || it->op == OP_BETWEEN || it->op == OP_NOT_BETWEEN)
+                match = true;
+        }
+        // Also match cross-table conditions (col-to-col with different tables)
+        if (!match && it->lhs_col.tab_name == it->rhs_col.tab_name && !it->rhs_col.tab_name.empty())
+            match = true;
+        if (match) {
             solved_conds.emplace_back(std::move(*it));
             it = conds.erase(it);
         } else {
