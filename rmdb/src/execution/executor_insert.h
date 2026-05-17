@@ -100,6 +100,10 @@ class InsertExecutor : public AbstractExecutor {
                     col = &tab_.cols[col_idx];
                 }
                 col_set[col_idx] = true;
+                // Allow INT->FLOAT implicit conversion
+                if (col->type == TYPE_FLOAT && val.type == TYPE_INT && !val.is_null_) {
+                    val.set_float((float)val.int_val);
+                }
                 if (col->type != val.type && !val.is_null_) {
                     throw IncompatibleTypeError(coltype2str(col->type), coltype2str(val.type));
                 }

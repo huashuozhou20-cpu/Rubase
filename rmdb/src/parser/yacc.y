@@ -576,12 +576,22 @@ opt_alias:
         /* empty */     { }
     |   IDENTIFIER      { }
     |   AS IDENTIFIER   { }
+    |   AS COUNT        { }
+    |   AS AVG          { }
+    |   AS SUM          { }
+    |   AS MAX          { }
+    |   AS MIN          { }
     ;
 
 optAliasStr:
         /* empty */     { $$ = ""; }
     |   IDENTIFIER      { $$ = $1; }
     |   AS IDENTIFIER   { $$ = $2; }
+    |   AS COUNT        { $$ = "count"; }
+    |   AS AVG          { $$ = "avg"; }
+    |   AS SUM          { $$ = "sum"; }
+    |   AS MAX          { $$ = "max"; }
+    |   AS MIN          { $$ = "min"; }
     ;
 
 fromList:
