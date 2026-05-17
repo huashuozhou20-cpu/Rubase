@@ -219,8 +219,18 @@ class SeqScanExecutor : public AbstractExecutor {
 
     void beginTuple() override {
         scan_ = std::make_unique<RmScan>(fh_);
+        // RmScan constructor already calls next() to position at first record.
+        // Check if the first record passes conditions; if not, advance.
+        if (scan_->is_end()) {
+            is_end_ = true;
+            return;
+        }
         is_end_ = false;
-        nextTuple();
+        rid_ = scan_->rid();
+        auto rec = fh_->get_record(rid_, context_);
+        if (!check_all_conds(*rec)) {
+            nextTuple();
+        }
     }
 
     void nextTuple() override {
