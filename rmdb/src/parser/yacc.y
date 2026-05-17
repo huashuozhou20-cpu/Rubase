@@ -156,6 +156,11 @@ ddl:
     {
         $$ = std::make_shared<CreateIndex>($3, $5);
     }
+    |   CREATE INDEX tbName ON tbName '(' colNameList ')'
+    {
+        // Alternative: CREATE INDEX name ON table (cols)
+        $$ = std::make_shared<CreateIndex>($5, $7);
+    }
     |   DROP INDEX tbName '(' colNameList ')'
     {
         $$ = std::make_shared<DropIndex>($3, $5);
@@ -304,6 +309,11 @@ type:
     {
         // Multiply by 4 for UTF-8 multi-byte character support
         $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, $3 * 4);
+    }
+    |   CHAR
+    {
+        // CHAR without length defaults to 1 char (4 bytes)
+        $$ = std::make_shared<TypeLen>(SV_TYPE_STRING, 4);
     }
     |   FLOAT
     {
