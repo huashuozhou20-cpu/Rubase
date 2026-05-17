@@ -356,6 +356,10 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
                 break;
             case OP_BETWEEN:
             case OP_NOT_BETWEEN: {
+                if (lhs_type == TYPE_FLOAT && cond.rhs_val.type == TYPE_INT)
+                    cond.rhs_val.set_float((float)cond.rhs_val.int_val);
+                if (lhs_type == TYPE_FLOAT && cond.rhs_val2.type == TYPE_INT)
+                    cond.rhs_val2.set_float((float)cond.rhs_val2.int_val);
                 cond.rhs_val.init_raw(lhs_col->len);
                 cond.rhs_val2.init_raw(lhs_col->len);
                 if (lhs_type != cond.rhs_val.type) {
@@ -366,6 +370,8 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
             case OP_IN:
             case OP_NOT_IN: {
                 for (auto &v : cond.in_values) {
+                    if (lhs_type == TYPE_FLOAT && v.type == TYPE_INT)
+                        v.set_float((float)v.int_val);
                     v.init_raw(lhs_col->len);
                     if (lhs_type != v.type) {
                         throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(v.type));
