@@ -65,9 +65,11 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 "TABLE" { return TABLE; }
 "DROP" { return DROP; }
 "DESC" { return DESC; }
+"DESCRIBE" { return DESC; }
 "INSERT" { return INSERT; }
 "INTO" { return INTO; }
 "VALUES" { return VALUES; }
+"DEFAULT" { return DEFAULT; }
 "DELETE" { return DELETE; }
 "FROM" { return FROM; }
 "WHERE" { return WHERE; }
@@ -75,7 +77,9 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 "SET" { return SET; }
 "SELECT" { return SELECT; }
 "INT" { return INT; }
+"INTEGER" { return INT; }
 "CHAR" { return CHAR; }
+"VARCHAR" { return CHAR; }
 "FLOAT" { return FLOAT; }
 "INDEX" { return INDEX; }
 "AND" { return AND; }
@@ -121,6 +125,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"|"%"
 ">=" { return GEQ; }
 "<=" { return LEQ; }
 "<>" { return NEQ; }
+"!=" { return NEQ; }
 {single_op} { return yytext[0]; }
     /* id */
 {identifier} {

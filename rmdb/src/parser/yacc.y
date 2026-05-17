@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP
+%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT
 %token TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE
 %token AVG BETWEEN COUNT DISTINCT FULL GROUP HAVING IN INNER IS LEFT LIKE LIMIT
@@ -48,6 +48,7 @@ using namespace ast;
 %type <sv_exprs> selectItems selectItemList
 %type <sv_val> value
 %type <sv_vals> valueList
+%type <sv_vals_list> valueTupleList
 %type <sv_str> tbName colName
 %type <sv_strs> colNameList fromList
 %type <sv_col> col
@@ -161,9 +162,9 @@ ddl:
     ;
 
 dml:
-        INSERT INTO tbName VALUES '(' valueList ')'
+        INSERT INTO tbName VALUES valueTupleList
     {
-        $$ = std::make_shared<InsertStmt>($3, $6);
+        $$ = std::make_shared<InsertStmt>($3, $5);
     }
     |   DELETE FROM tbName optWhereClause
     {
@@ -229,7 +230,19 @@ colNameList:
 field:
         colName type
     {
-        $$ = std::make_shared<ColDef>($1, $2);
+        $$ = std::make_shared<ColDef>($1, $2, false, nullptr);
+    }
+    |   colName type NOT VALUE_NULL
+    {
+        $$ = std::make_shared<ColDef>($1, $2, true, nullptr);
+    }
+    |   colName type DEFAULT value
+    {
+        $$ = std::make_shared<ColDef>($1, $2, false, $4);
+    }
+    |   colName type NOT VALUE_NULL DEFAULT value
+    {
+        $$ = std::make_shared<ColDef>($1, $2, true, $6);
     }
     ;
 
@@ -256,6 +269,17 @@ valueList:
     |   valueList ',' value
     {
         $$.push_back($3);
+    }
+    ;
+
+valueTupleList:
+        '(' valueList ')'
+    {
+        $$ = std::vector<std::vector<std::shared_ptr<Value>>>{$2};
+    }
+    |   valueTupleList ',' '(' valueList ')'
+    {
+        $$.push_back($4);
     }
     ;
 

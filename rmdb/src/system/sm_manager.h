@@ -22,6 +22,9 @@ struct ColDef {
     std::string name;  // Column name
     ColType type;      // Type of column
     int len;           // Length of column
+    bool not_null = false;
+    bool has_default = false;
+    std::string default_val;  // string representation of default value
 };
 
 /* 系统管理器，负责元数据管理和DDL语句的执行 */

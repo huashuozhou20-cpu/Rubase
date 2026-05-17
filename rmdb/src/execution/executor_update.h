@@ -67,6 +67,9 @@ class UpdateExecutor : public AbstractExecutor {
                 // 查找列偏移
                 for (auto &col : tab_.cols) {
                     if (col.name == lhs_col.col_name) {
+                        if (col.not_null && rhs_val.is_null_) {
+                            throw RMDBError("Column '" + col.name + "' cannot be NULL");
+                        }
                         memcpy(new_rec->data + col.offset, rhs_val.raw->data, col.len);
                         break;
                     }

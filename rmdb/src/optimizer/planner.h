@@ -57,6 +57,20 @@ class Planner {
     // int get_indexNo(std::string tab_name, std::vector<Condition> curr_conds);
     bool get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names);
 
+    std::string ast_value_to_string(const std::shared_ptr<ast::Value> &val) {
+        if (auto v = std::dynamic_pointer_cast<ast::IntLit>(val))
+            return std::to_string(v->val);
+        if (auto v = std::dynamic_pointer_cast<ast::FloatLit>(val))
+            return std::to_string(v->val);
+        if (auto v = std::dynamic_pointer_cast<ast::StringLit>(val))
+            return v->val;
+        if (auto v = std::dynamic_pointer_cast<ast::BoolLit>(val))
+            return v->val ? "TRUE" : "FALSE";
+        if (std::dynamic_pointer_cast<ast::NullLit>(val))
+            return "NULL";
+        return "NULL";
+    }
+
     ColType interp_sv_type(ast::SvType sv_type) {
         std::map<ast::SvType, ColType> m = {
             {ast::SV_TYPE_INT, TYPE_INT}, {ast::SV_TYPE_FLOAT, TYPE_FLOAT}, {ast::SV_TYPE_STRING, TYPE_STRING}};

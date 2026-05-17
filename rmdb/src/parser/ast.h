@@ -141,14 +141,21 @@ struct TypeLen : public TreeNode {
     TypeLen(SvType type_, int len_) : type(type_), len(len_) {}
 };
 
+// forward declaration for ColDef's default_val_ member
+struct Value;
+
 // Field 是列定义的基类（目前只有 ColDef，未来可扩展约束等）
 struct Field : public TreeNode {};
 
 struct ColDef : public Field {
     std::string col_name;
     std::shared_ptr<TypeLen> type_len;
-    ColDef(std::string col_name_, std::shared_ptr<TypeLen> type_len_)
-        : col_name(std::move(col_name_)), type_len(std::move(type_len_)) {}
+    bool not_null_;
+    std::shared_ptr<Value> default_val_;  // DEFAULT value (nullptr if none)
+    ColDef(std::string col_name_, std::shared_ptr<TypeLen> type_len_,
+           bool not_null_ = false, std::shared_ptr<Value> default_val_ = nullptr)
+        : col_name(std::move(col_name_)), type_len(std::move(type_len_)),
+          not_null_(not_null_), default_val_(std::move(default_val_)) {}
 };
 
 // ============================================================================
@@ -173,26 +180,32 @@ struct CondExpr : public TreeNode {};
 
 // ---- 字面量 ----
 
-struct Value : public Expr {};
+struct Value : public Expr {
+    virtual std::string to_string() const = 0;
+};
 
 struct IntLit : public Value {
     int val;
     IntLit(int val_) : val(val_) {}
+    std::string to_string() const override { return std::to_string(val); }
 };
 
 struct FloatLit : public Value {
     float val;
     FloatLit(float val_) : val(val_) {}
+    std::string to_string() const override { return std::to_string(val); }
 };
 
 struct StringLit : public Value {
     std::string val;
     StringLit(std::string val_) : val(std::move(val_)) {}
+    std::string to_string() const override { return val; }
 };
 
 struct BoolLit : public Value {
     bool val;
     BoolLit(bool val_) : val(val_) {}
+    std::string to_string() const override { return val ? "TRUE" : "FALSE"; }
 };
 
 /*
@@ -202,7 +215,9 @@ struct BoolLit : public Value {
  *     2. 独立节点使得类型推导阶段可以更好地处理 NULL 的类型传播
  *        （例如 INSERT INTO t VALUES (NULL) 中 NULL 的类型由目标列决定）
  */
-struct NullLit : public Value {};
+struct NullLit : public Value {
+    std::string to_string() const override { return "NULL"; }
+};
 
 // ---- 列引用 ----
 
@@ -411,9 +426,9 @@ struct LimitClause : public TreeNode {
 
 struct InsertStmt : public TreeNode {
     std::string tab_name;
-    std::vector<std::shared_ptr<Value>> vals;
-    InsertStmt(std::string tab_name_, std::vector<std::shared_ptr<Value>> vals_)
-        : tab_name(std::move(tab_name_)), vals(std::move(vals_)) {}
+    std::vector<std::vector<std::shared_ptr<Value>>> vals_list;
+    InsertStmt(std::string tab_name_, std::vector<std::vector<std::shared_ptr<Value>>> vals_list_)
+        : tab_name(std::move(tab_name_)), vals_list(std::move(vals_list_)) {}
 };
 
 struct DeleteStmt : public TreeNode {
@@ -573,6 +588,7 @@ struct SemValue {
     // ---- 值 ----
     std::shared_ptr<Value> sv_val;
     std::vector<std::shared_ptr<Value>> sv_vals;
+    std::vector<std::vector<std::shared_ptr<Value>>> sv_vals_list;
 
     // ---- 列 ----
     std::shared_ptr<Col> sv_col;

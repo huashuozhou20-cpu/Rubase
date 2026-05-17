@@ -173,7 +173,7 @@ void SmManager::show_tables(Context* context) {
 void SmManager::desc_table(const std::string& tab_name, Context* context) {
     TabMeta &tab = db_.get_table(tab_name);
 
-    std::vector<std::string> captions = {"Field", "Type", "Index"};
+    std::vector<std::string> captions = {"Field", "Type", "Null", "Default", "Index"};
     RecordPrinter printer(captions.size());
     // Print header
     printer.print_separator(context);
@@ -182,12 +182,18 @@ void SmManager::desc_table(const std::string& tab_name, Context* context) {
     // Write header to file
     std::fstream outfile;
     outfile.open("output.txt", std::ios::out | std::ios::app);
-    outfile << "| Field | Type | Index |\n";
+    outfile << "| Field | Type | Null | Default | Index |\n";
     // Print fields
     for (auto &col : tab.cols) {
-        std::vector<std::string> field_info = {col.name, coltype2str(col.type), col.index ? "YES" : "NO"};
+        std::string def_str = col.has_default ? col.default_val : "NULL";
+        std::vector<std::string> field_info = {col.name, coltype2str(col.type),
+                                               col.not_null ? "NO" : "YES",
+                                               def_str,
+                                               col.index ? "YES" : "NO"};
         printer.print_record(field_info, context);
-        outfile << "| " << col.name << " | " << coltype2str(col.type) << " | " << (col.index ? "YES" : "NO") << " |\n";
+        outfile << "| " << col.name << " | " << coltype2str(col.type) << " | "
+                << (col.not_null ? "NO" : "YES") << " | " << def_str << " | "
+                << (col.index ? "YES" : "NO") << " |\n";
     }
     // Print footer
     printer.print_separator(context);
@@ -214,7 +220,10 @@ void SmManager::create_table(const std::string& tab_name, const std::vector<ColD
                        .type = col_def.type,
                        .len = col_def.len,
                        .offset = curr_offset,
-                       .index = false};
+                       .index = false,
+                       .not_null = col_def.not_null,
+                       .has_default = col_def.has_default,
+                       .default_val = col_def.default_val};
         curr_offset += col_def.len;
         tab.cols.push_back(col);
     }

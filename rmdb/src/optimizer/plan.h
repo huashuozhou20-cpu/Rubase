@@ -141,20 +141,20 @@ class DMLPlan : public Plan
 {
     public:
         DMLPlan(PlanTag tag, std::shared_ptr<Plan> subplan,std::string tab_name,
-                std::vector<Value> values, std::vector<Condition> conds,
+                std::vector<std::vector<Value>> values_list, std::vector<Condition> conds,
                 std::vector<SetClause> set_clauses)
         {
             Plan::tag = tag;
             subplan_ = std::move(subplan);
             tab_name_ = std::move(tab_name);
-            values_ = std::move(values);
+            values_list_ = std::move(values_list);
             conds_ = std::move(conds);
             set_clauses_ = std::move(set_clauses);
         }
         ~DMLPlan(){}
         std::shared_ptr<Plan> subplan_;
         std::string tab_name_;
-        std::vector<Value> values_;
+        std::vector<std::vector<Value>> values_list_;
         std::vector<Condition> conds_;
         std::vector<SetClause> set_clauses_;
 };

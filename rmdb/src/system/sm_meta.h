@@ -27,15 +27,25 @@ struct ColMeta {
     int len;                // 字段长度
     int offset;             // 字段位于记录中的偏移量
     bool index;             /** unused */
+    bool not_null = false;  // NOT NULL constraint
+    bool has_default = false;
+    std::string default_val;  // DEFAULT value (single token, no spaces)
 
     friend std::ostream &operator<<(std::ostream &os, const ColMeta &col) {
-        // ColMeta中有各个基本类型的变量，然后调用重载的这些变量的操作符<<（具体实现逻辑在defs.h）
-        return os << col.tab_name << ' ' << col.name << ' ' << col.type << ' ' << col.len << ' ' << col.offset << ' '
-                  << col.index;
+        os << col.tab_name << ' ' << col.name << ' ' << col.type << ' ' << col.len << ' ' << col.offset << ' '
+           << col.index << ' ' << col.not_null << ' ' << col.has_default;
+        if (col.has_default) {
+            os << ' ' << col.default_val;
+        }
+        return os;
     }
 
     friend std::istream &operator>>(std::istream &is, ColMeta &col) {
-        return is >> col.tab_name >> col.name >> col.type >> col.len >> col.offset >> col.index;
+        is >> col.tab_name >> col.name >> col.type >> col.len >> col.offset >> col.index >> col.not_null >> col.has_default;
+        if (col.has_default) {
+            is >> col.default_val;
+        }
+        return is;
     }
 };
 
