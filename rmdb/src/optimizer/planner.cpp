@@ -390,8 +390,8 @@ std::shared_ptr<Plan> Planner::generate_select_plan(std::shared_ptr<Query> query
 
     //物理优化
     auto sel_cols = query->cols;
-    // If no regular columns (pure aggregate query), build projection from agg column names
-    if (sel_cols.empty() && query->has_agg) {
+    // Append aggregate output columns so projection includes them
+    if (query->has_agg) {
         auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
         if (x) {
             for (auto &agg : x->aggs) {
