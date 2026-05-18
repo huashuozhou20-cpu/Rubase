@@ -385,6 +385,13 @@ private:
     lsn_t persist_lsn_;                 // 记录已经持久化到磁盘中的最后一条日志的日志号
     DiskManager* disk_manager_;
 
+    // Group commit (Leader-Follower)
+    bool is_flushing_{false};
+    std::condition_variable group_commit_cv_;
+    std::mutex io_latch_;                              // 保护磁盘 I/O，防止 Leader 与溢出刷盘竞态
+    char flush_buffer_[LOG_BUFFER_SIZE + 1];
+    int flush_offset_{0};
+
     // Background flush thread
     std::thread flush_thread_;
     std::atomic<bool> stop_flush_{false};

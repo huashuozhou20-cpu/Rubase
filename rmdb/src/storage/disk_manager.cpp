@@ -254,4 +254,5 @@ void DiskManager::write_log(char *log_data, int size) {
     if (bytes_write != size) {
         throw UnixError();
     }
+    fdatasync(log_fd_);
 }

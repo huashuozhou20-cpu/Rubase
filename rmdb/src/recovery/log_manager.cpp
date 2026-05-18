@@ -23,6 +23,7 @@ lsn_t LogManager::add_log_to_buffer(LogRecord* log_record) {
     int log_len = log_record->log_tot_len_;
     if (log_buffer_.is_full(log_len)) {
         if (log_buffer_.offset_ > 0) {
+            std::scoped_lock io_lock(io_latch_);
             disk_manager_->write_log(log_buffer_.buffer_, log_buffer_.offset_);
         }
         persist_lsn_ = lsn - 1;
@@ -34,16 +35,43 @@ lsn_t LogManager::add_log_to_buffer(LogRecord* log_record) {
 }
 
 /**
- * @description: 把日志缓冲区的内容刷到磁盘中，由于目前只设置了一个缓冲区，因此需要阻塞其他日志操作
+ * @description: 把日志缓冲区的内容刷到磁盘中（Leader-Follower 组提交）
+ * Leader 拷贝缓冲区后释放 latch_，在 I/O 期间允许并发追加日志；
+ * Follower 在 group_commit_cv_ 上阻塞，Leader 完成 I/O 后唤醒它们。
  */
 void LogManager::flush_log_to_disk() {
-    std::scoped_lock lock(latch_);
-    if (log_buffer_.offset_ > 0) {
-        disk_manager_->write_log(log_buffer_.buffer_, log_buffer_.offset_);
-        persist_lsn_ = global_lsn_ - 1;
-        log_buffer_.offset_ = 0;
+    std::unique_lock<std::mutex> lock(latch_);
+
+    // Follower: 已有 Leader 在执行 I/O，阻塞等待
+    if (is_flushing_) {
+        group_commit_cv_.wait(lock);
+        return;
     }
-    flush_cv_.notify_one();
+
+    // Leader: 无数据则直接返回
+    if (log_buffer_.offset_ == 0) {
+        return;
+    }
+
+    is_flushing_ = true;
+
+    // 拷贝缓冲区数据到本地，重置 offset_，释放锁允许并发追加
+    memcpy(flush_buffer_, log_buffer_.buffer_, log_buffer_.offset_);
+    flush_offset_ = log_buffer_.offset_;
+    log_buffer_.offset_ = 0;
+    lock.unlock();
+
+    // 核心 I/O：持有 io_latch_ 防止与 add_log_to_buffer 溢出刷盘竞态
+    {
+        std::scoped_lock io_lock(io_latch_);
+        disk_manager_->write_log(flush_buffer_, flush_offset_);
+    }
+
+    // 重新获取锁，更新持久化位点，唤醒 Followers
+    lock.lock();
+    persist_lsn_ = global_lsn_ - 1;
+    is_flushing_ = false;
+    group_commit_cv_.notify_all();
 }
 
 void LogManager::flush_thread_loop() {
