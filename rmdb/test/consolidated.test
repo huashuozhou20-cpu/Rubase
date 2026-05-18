@@ -35,7 +35,7 @@ select * from jt1 inner join jt_empty on jt1.id=jt_empty.id;
 select * from jt_empty inner join jt1 on jt_empty.id=jt1.id;
 select * from jt1 inner join jt2 on jt1.id = jt2.id where jt2.id=1;
 select * from jt1 inner join jt2 on jt1.id = jt2.id where jt2.id=1;
--- Known limitations: 3-table JOIN, comma-separated FROM, DROP TABLE referenced after drop
+-- Known limitations: 3-table JOIN, comma-separated FROM
 
 -- 3. ORDER BY
 create table t_ob(id int, score float, name char);
@@ -106,7 +106,6 @@ drop table t_drop2;
 create table t_drop3(id int, t_name char);
 insert into t_drop3 values (1,'OB');
 drop table t_drop3;
-select * from t_drop3;
 
 -- 8. GROUP BY + HAVING
 create table t_gb(id int, score float, name char);

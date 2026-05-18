@@ -129,6 +129,9 @@ void DiskManager::destroy_file(const std::string &path) {
     if (path2fd_.count(path)) {
         throw FileNotClosedError(path);
     }
+    if (!is_file(path)) {
+        throw FileNotFoundError(path);
+    }
     if (unlink(path.c_str()) < 0) {
         throw UnixError();
     }

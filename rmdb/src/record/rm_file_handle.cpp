@@ -17,6 +17,10 @@ See the Mulan PSL v2 for more details. */
  * @return {unique_ptr<RmRecord>} rid对应的记录对象指针
  */
 std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* context) const {
+    if (context != nullptr) {
+        context->lock_mgr_->lock_IS_on_table(context->txn_, fd_);
+        context->lock_mgr_->lock_shared_on_record(context->txn_, rid, fd_);
+    }
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
     if (!Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
         buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
@@ -35,6 +39,9 @@ std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* cont
  * @return {Rid} 插入的记录的记录号（位置）
  */
 Rid RmFileHandle::insert_record(char* buf, Context* context) {
+    if (context != nullptr) {
+        context->lock_mgr_->lock_IX_on_table(context->txn_, fd_);
+    }
     RmPageHandle page_handle = create_page_handle();
     int slot_no = Bitmap::first_bit(false, page_handle.bitmap, file_hdr_.num_records_per_page);
     char* slot = page_handle.get_slot(slot_no);
@@ -48,7 +55,11 @@ Rid RmFileHandle::insert_record(char* buf, Context* context) {
         file_hdr_.first_free_page_no = page_no;
     }
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
-    return Rid{page_no, slot_no};
+    Rid rid{page_no, slot_no};
+    if (context != nullptr) {
+        context->lock_mgr_->lock_exclusive_on_record(context->txn_, rid, fd_);
+    }
+    return rid;
 }
 
 /**
@@ -77,6 +88,10 @@ void RmFileHandle::insert_record(const Rid& rid, char* buf) {
  * @param {Context*} context
  */
 void RmFileHandle::delete_record(const Rid& rid, Context* context) {
+    if (context != nullptr) {
+        context->lock_mgr_->lock_IX_on_table(context->txn_, fd_);
+        context->lock_mgr_->lock_exclusive_on_record(context->txn_, rid, fd_);
+    }
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
     if (!Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
         buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
@@ -99,6 +114,10 @@ void RmFileHandle::delete_record(const Rid& rid, Context* context) {
  * @param {Context*} context
  */
 void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
+    if (context != nullptr) {
+        context->lock_mgr_->lock_IX_on_table(context->txn_, fd_);
+        context->lock_mgr_->lock_exclusive_on_record(context->txn_, rid, fd_);
+    }
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
     if (!Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
         buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);

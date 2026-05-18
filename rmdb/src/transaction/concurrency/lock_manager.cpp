@@ -63,20 +63,19 @@ void LockManager::update_group_lock_mode(LockRequestQueue& queue) {
 }
 
 bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, LockMode lock_mode) {
-    std::scoped_lock lock(latch_);
+    std::unique_lock<std::mutex> lock(latch_);
 
     auto& queue = lock_table_[lock_data_id];
 
     // Check if this transaction already holds a lock on this item
     for (auto& req : queue.request_queue_) {
         if (req.txn_id_ == txn->get_transaction_id() && req.granted_) {
-            // Same lock type or upgrade
+            // Same lock type
             if (req.lock_mode_ == lock_mode) {
-                return true;  // Already holds this lock
+                return true;
             }
-            // Lock upgrade not supported in basic 2PL, just return true
+            // Lock upgrade S to X
             if (req.lock_mode_ == LockMode::SHARED && lock_mode == LockMode::EXLUCSIVE) {
-                // Upgrade S to X: check if only this txn holds S
                 bool can_upgrade = true;
                 for (auto& other : queue.request_queue_) {
                     if (other.txn_id_ != txn->get_transaction_id() && other.granted_) {
@@ -90,18 +89,38 @@ bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, 
                     return true;
                 }
             }
+            // Already holds a lock that covers the requested lock mode
+            // X covers everything; SIX covers S and IX; IX covers IS
+            if (req.lock_mode_ == LockMode::EXLUCSIVE) return true;       // X covers all
+            if (req.lock_mode_ == LockMode::S_IX) {
+                if (lock_mode == LockMode::SHARED || lock_mode == LockMode::INTENTION_EXCLUSIVE
+                    || lock_mode == LockMode::INTENTION_SHARED) return true;  // SIX covers S, IX, IS
+            }
+            if (req.lock_mode_ == LockMode::INTENTION_EXCLUSIVE
+                && lock_mode == LockMode::INTENTION_SHARED) return true;  // IX covers IS
         }
     }
 
-    // Check compatibility
-    if (!is_compatible(lock_mode, queue.group_lock_mode_)) {
-        // Check for deadlock and select optimal victim
+    // Wait until the lock request is compatible with the current group lock mode
+    while (!is_compatible(lock_mode, queue.group_lock_mode_)) {
+        // Check for deadlock
         txn_id_t victim = find_deadlock_victim(txn->get_transaction_id(), queue);
         if (victim != INVALID_TXN_ID) {
-            throw TransactionAbortException(victim,
-                                            AbortReason::DEADLOCK_PREVENTION);
+            throw TransactionAbortException(victim, AbortReason::DEADLOCK_PREVENTION);
         }
-        return false;
+        // Add an ungranted request so deadlock detection can see us
+        LockRequest wait_req(txn->get_transaction_id(), lock_mode);
+        wait_req.granted_ = false;
+        queue.request_queue_.push_back(wait_req);
+        // Block until something changes in this lock queue
+        queue.cv_.wait(lock);
+        // Remove our ungranted request
+        for (auto it = queue.request_queue_.begin(); it != queue.request_queue_.end(); ++it) {
+            if (it->txn_id_ == txn->get_transaction_id() && !it->granted_) {
+                queue.request_queue_.erase(it);
+                break;
+            }
+        }
     }
 
     // Grant the lock
@@ -109,8 +128,6 @@ bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, 
     new_req.granted_ = true;
     queue.request_queue_.push_back(new_req);
     update_group_lock_mode(queue);
-
-    // Add to transaction's lock set
     txn->get_lock_set()->insert(lock_data_id);
 
     return true;
@@ -238,7 +255,7 @@ txn_id_t LockManager::find_deadlock_victim(txn_id_t requestor, const LockRequest
 }
 
 bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
-    std::scoped_lock lock(latch_);
+    std::unique_lock<std::mutex> lock(latch_);
 
     auto it = lock_table_.find(lock_data_id);
     if (it == lock_table_.end()) {
@@ -254,13 +271,18 @@ bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
             requests.erase(req_it);
             update_group_lock_mode(queue);
 
+            // Remove from transaction's lock set
+            txn->get_lock_set()->erase(lock_data_id);
+
             // Clean up empty queues
             if (requests.empty()) {
                 lock_table_.erase(it);
+                // Wake up anyone who might be waiting for this lock (edge case)
+                queue.cv_.notify_all();
+            } else {
+                // Wake up waiters on this queue since group lock mode changed
+                queue.cv_.notify_all();
             }
-
-            // Remove from transaction's lock set
-            txn->get_lock_set()->erase(lock_data_id);
 
             return true;
         }
