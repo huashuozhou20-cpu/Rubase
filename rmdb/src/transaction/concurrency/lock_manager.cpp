@@ -271,17 +271,12 @@ bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
             requests.erase(req_it);
             update_group_lock_mode(queue);
 
-            // Remove from transaction's lock set
-            txn->get_lock_set()->erase(lock_data_id);
+            // Wake up waiters on this queue since group lock mode may have changed
+            queue.cv_.notify_all();
 
             // Clean up empty queues
             if (requests.empty()) {
                 lock_table_.erase(it);
-                // Wake up anyone who might be waiting for this lock (edge case)
-                queue.cv_.notify_all();
-            } else {
-                // Wake up waiters on this queue since group lock mode changed
-                queue.cv_.notify_all();
             }
 
             return true;
