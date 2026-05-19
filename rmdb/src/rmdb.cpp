@@ -29,6 +29,7 @@ See the Mulan PSL v2 for more details. */
 #define MAX_CONN_LIMIT 8
 
 static bool should_exit = false;
+static std::atomic<int> active_connections{0};
 
 // 构建全局所需的管理器对象
 auto disk_manager = std::make_unique<DiskManager>();
@@ -172,6 +173,8 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
 void *client_handler(void *sock_fd) {
     int fd = *((int *)sock_fd);
     pthread_mutex_unlock(sockfd_mutex);
+
+    active_connections.fetch_add(1);
 
     int i_recvBytes;
     // 接收客户端发送的请求
@@ -393,6 +396,7 @@ void *client_handler(void *sock_fd) {
     // Clear
     std::cout << "Terminating current client_connection..." << std::endl;
     close(fd);           // close a file descriptor.
+    active_connections.fetch_sub(1);
     pthread_exit(NULL);  // terminate calling thread!
 }
 
@@ -448,7 +452,19 @@ void start_server() {
             std::cout << "Accept error!" << std::endl;
             continue;  // ignore current socket ,continue while loop.
         }
-        
+
+        // Reject gracefully when at connection limit — send error to client
+        // before closing, so clients see a clear failure instead of a hard drop.
+        if (active_connections.load() >= MAX_CONN_LIMIT) {
+            std::cout << "Connection limit reached (" << MAX_CONN_LIMIT
+                      << "), rejecting new connection." << std::endl;
+            const char *msg = "Error: Too many connections, server limit reached.\n";
+            send_result_to_client(sockfd, msg, strlen(msg));
+            close(sockfd);
+            pthread_mutex_unlock(sockfd_mutex);  // release before continuing loop
+            continue;
+        }
+
         // 和客户端建立连接，并开启一个线程负责处理客户端请求
         if (pthread_create(&thread_id, nullptr, &client_handler, (void *)(&sockfd)) != 0) {
             std::cout << "Create thread fail!" << std::endl;

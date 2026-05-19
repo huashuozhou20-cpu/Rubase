@@ -206,7 +206,12 @@ class StressTestRunner:
             subprocess.run(["rm", "-rf", mydb_path], capture_output=True)
             subprocess.Popen([self._server_bin, "mydb"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(2)
+            time.sleep(3)
+            # Wait until server is actually accepting connections
+            for _ in range(20):
+                if self._server_alive():
+                    break
+                time.sleep(0.25)
             print(f"  *** 服务器已重启，重新初始化表结构... ***")
             try:
                 self._setup_tables()
@@ -215,13 +220,13 @@ class StressTestRunner:
                 print(f"  *** 表结构恢复失败: {e} ***\n")
 
     def _new_client(self) -> RMDBClient:
-        for attempt in range(3):
+        for attempt in range(10):  # up to 5 seconds total
             try:
                 c = RMDBClient(self.host, self.port)
                 c.connect()
                 return c
             except Exception:
-                if attempt < 2:
+                if attempt < 9:
                     time.sleep(0.5)
         # Last attempt — let the exception propagate
         c = RMDBClient(self.host, self.port)
