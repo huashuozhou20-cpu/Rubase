@@ -184,3 +184,45 @@ void BufferPoolManager::flush_all_pages(int fd) {
         }
     }
 }
+
+void BufferPoolManager::flush_thread_loop() {
+    while (!stop_flush_) {
+        {
+            std::unique_lock<std::mutex> lock(flush_mutex_);
+            flush_cv_.wait_for(lock, flush_interval_, [this] {
+                return stop_flush_.load();
+            });
+        }
+        if (stop_flush_) break;
+
+        // Collect unpinned dirty page IDs under latch
+        std::vector<PageId> dirty_ids;
+        {
+            std::scoped_lock lock(latch_);
+            for (auto &[page_id, frame_id] : page_table_) {
+                Page* page = &pages_[frame_id];
+                if (page->is_dirty_ && page->pin_count_ == 0) {
+                    dirty_ids.push_back(page_id);
+                }
+            }
+        }
+        // Flush each dirty page (flush_page handles its own locking)
+        for (auto &page_id : dirty_ids) {
+            flush_page(page_id);
+        }
+    }
+}
+
+void BufferPoolManager::start_flush_thread() {
+    if (flush_thread_.joinable()) return;
+    stop_flush_ = false;
+    flush_thread_ = std::thread(&BufferPoolManager::flush_thread_loop, this);
+}
+
+void BufferPoolManager::stop_flush_thread() {
+    stop_flush_ = true;
+    flush_cv_.notify_all();
+    if (flush_thread_.joinable()) {
+        flush_thread_.join();
+    }
+}

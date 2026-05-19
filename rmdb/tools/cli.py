@@ -57,7 +57,7 @@ def main():
             if ";" in line:
                 break
 
-        sql = " ".join(lines).strip()
+        sql = "\n".join(lines).strip()
         sql = sql.replace("\r", "")
         if not sql:
             continue

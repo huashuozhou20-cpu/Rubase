@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #include "storage/disk_manager.h"
 
 #include <assert.h>    // for assert
+#include <fcntl.h>     // for posix_fadvise
 #include <string.h>    // for memset
 #include <sys/stat.h>  // for stat, mkdir
 #include <unistd.h>    // for lseek
@@ -53,6 +54,8 @@ void DiskManager::read_page(int fd, page_id_t page_no, char *offset, int num_byt
     if (bytes_read != num_bytes) {
         throw InternalError("DiskManager::read_page Error");
     }
+    // Drop kernel page cache to eliminate double caching with BufferPool
+    posix_fadvise(fd, static_cast<off_t>(page_no) * PAGE_SIZE, num_bytes, POSIX_FADV_DONTNEED);
 }
 
 /**
@@ -255,4 +258,14 @@ void DiskManager::write_log(char *log_data, int size) {
         throw UnixError();
     }
     fdatasync(log_fd_);
+}
+
+void DiskManager::truncate_log() {
+    if (log_fd_ == -1) {
+        log_fd_ = open_file(LOG_FILE_NAME);
+    }
+    if (ftruncate(log_fd_, 0) != 0) {
+        throw UnixError();
+    }
+    lseek(log_fd_, 0, SEEK_SET);
 }

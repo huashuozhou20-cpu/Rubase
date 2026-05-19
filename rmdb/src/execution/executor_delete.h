@@ -57,6 +57,16 @@ class DeleteExecutor : public AbstractExecutor {
             }
             // 删除记录
             fh_->delete_record(rid, context_);
+
+            // WAL: log the delete (chain prev_lsn for undo traversal)
+            auto* delete_log = new DeleteLogRecord(context_->txn_->get_transaction_id(), *rec, rid, tab_name_);
+            delete_log->prev_lsn_ = context_->txn_->get_prev_lsn();
+            auto delete_lsn = context_->log_mgr_->add_log_to_buffer(delete_log);
+            context_->txn_->set_prev_lsn(delete_lsn);
+
+            // Record for rollback (store old value for undo)
+            auto* wr = new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec);
+            context_->txn_->append_write_record(wr);
         }
         return nullptr;
     }

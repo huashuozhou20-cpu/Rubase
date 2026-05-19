@@ -83,6 +83,16 @@ class UpdateExecutor : public AbstractExecutor {
             // 更新记录
             fh_->update_record(rid, new_rec->data, context_);
 
+            // WAL: log the update (old + new values, chain prev_lsn for undo traversal)
+            auto* update_log = new UpdateLogRecord(context_->txn_->get_transaction_id(), *old_rec, *new_rec, rid, tab_name_);
+            update_log->prev_lsn_ = context_->txn_->get_prev_lsn();
+            auto update_lsn = context_->log_mgr_->add_log_to_buffer(update_log);
+            context_->txn_->set_prev_lsn(update_lsn);
+
+            // Record for rollback (store old value for undo)
+            auto* wr = new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec);
+            context_->txn_->append_write_record(wr);
+
             // 在索引中插入新key
             for (size_t i = 0; i < tab_.indexes.size(); i++) {
                 auto &index = tab_.indexes[i];

@@ -12,8 +12,12 @@ See the Mulan PSL v2 for more details. */
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cassert>
+#include <chrono>
+#include <condition_variable>
 #include <list>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -43,9 +47,11 @@ class BufferPoolManager {
         for (size_t i = 0; i < pool_size_; ++i) {
             free_list_.emplace_back(static_cast<frame_id_t>(i));  // static_cast转换数据类型
         }
+        start_flush_thread();
     }
 
     ~BufferPoolManager() {
+        stop_flush_thread();
         delete[] pages_;
         delete replacer_;
     }
@@ -69,8 +75,20 @@ class BufferPoolManager {
 
     void flush_all_pages(int fd);
 
+    // Background flush thread
+    void start_flush_thread();
+    void stop_flush_thread();
+
    private:
     bool find_victim_page(frame_id_t* frame_id);
 
     void update_page(Page* page, PageId new_page_id, frame_id_t new_frame_id);
+
+    // Background flush thread
+    void flush_thread_loop();
+    std::thread flush_thread_;
+    std::atomic<bool> stop_flush_{false};
+    std::condition_variable flush_cv_;
+    std::mutex flush_mutex_;
+    std::chrono::milliseconds flush_interval_{1000};
 };
