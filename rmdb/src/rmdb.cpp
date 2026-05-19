@@ -363,8 +363,12 @@ void *client_handler(void *sock_fd) {
                 yy_delete_buffer(buf);
                 pthread_mutex_unlock(buffer_mutex);
             }
-            // 将格式化结果发送给客户端
+            // 将格式化结果发送给客户端（空结果时发送确认符，使客户端可区分成功）
             send_response:
+            if (offset == 0) {
+                data_send[0] = '\n';
+                offset = 1;
+            }
             if (send_result_to_client(fd, data_send, offset) < 0) {
                 send_error = true;
                 delete context;

@@ -187,6 +187,24 @@ std::pair<NodeHandleGuard, bool> IxIndexHandle::find_leaf_page(const char *key, 
                                                                Transaction *transaction, bool find_first) {
     page_id_t page_no = file_hdr_->root_page_;
     auto node = fetch_node(page_no);
+
+    if (operation == Operation::FIND) {
+        // Hand-over-hand read latches: latch child before releasing parent,
+        // preventing a concurrent split from making the child pointer stale.
+        node->page->rlock();
+        while (!node->is_leaf_page()) {
+            page_id_t child_page_no = node->internal_lookup(key);
+            auto child = fetch_node(child_page_no);
+            child->page->rlock();
+            node->page->runlock();   // release parent after child is latched
+            node = std::move(child);
+        }
+        return std::make_pair(std::move(node), false);
+    }
+
+    // INSERT / DELETE: serialized by root_latch_ in the caller.
+    // Page-level write latches are taken by the caller on the specific pages
+    // being modified (leaf + any ancestors that split/merge).
     while (!node->is_leaf_page()) {
         page_id_t child_page_no = node->internal_lookup(key);
         node = fetch_node(child_page_no);
@@ -284,6 +302,8 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
     }
 
     auto parent = fetch_node(old_node->get_parent_page_no());
+    // Write-latch parent before modifying its child list
+    parent->page->wlock();
     int child_idx = parent->find_child(old_node);
     Rid rid = {.page_no = new_node->get_page_no(), .slot_no = 0};
     parent->insert_pair(child_idx + 1, key, rid);
@@ -296,6 +316,7 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
     }
 
     parent.set_dirty(true);
+    parent->page->wunlock();
 }
 
 /**
@@ -305,8 +326,14 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
  * @return page_id_t 插入到的叶结点的page_no
  */
 page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transaction *transaction) {
+    // Serialize all index modifications to prevent concurrent split corruption
+    std::lock_guard<std::mutex> guard(root_latch_);
+
     auto result = find_leaf_page(key, Operation::INSERT, transaction);
     auto leaf = std::move(result.first);
+
+    // Write-latch the leaf page before modifying it
+    leaf->page->wlock();
     leaf->insert(key, value);
     page_id_t leaf_page_no = leaf->get_page_no();
 
@@ -320,6 +347,7 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
     }
 
     leaf.set_dirty(true);
+    leaf->page->wunlock();
     return leaf_page_no;
 }
 
@@ -329,13 +357,19 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
  * @param transaction 事务指针
  */
 bool IxIndexHandle::delete_entry(const char *key, Transaction *transaction) {
+    // Serialize all index modifications
+    std::lock_guard<std::mutex> guard(root_latch_);
+
     auto result = find_leaf_page(key, Operation::DELETE, transaction);
     auto leaf = std::move(result.first);
 
+    // Write-latch the leaf before modifying
+    leaf->page->wlock();
     int old_size = leaf->get_size();
     leaf->remove(key);
     if (leaf->get_size() == old_size) {
         // key not found
+        leaf->page->wunlock();
         return false;
     }
 
@@ -345,8 +379,10 @@ bool IxIndexHandle::delete_entry(const char *key, Transaction *transaction) {
         leaf.set_dirty(true);
     }
 
+    leaf->page->wunlock();
+
     if (node_should_delete) {
-        // root was deleted or merged, recursively handle if needed
+        // root was deleted or merged, recursively handled
     }
 
     return true;
@@ -372,15 +408,19 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle *node, Transaction *tr
     }
 
     auto parent = fetch_node(node->get_parent_page_no());
+    parent->page->wlock();  // write-latch parent before modifying child list
     int index = parent->find_child(node);
 
     int neighbor_index = (index > 0) ? index - 1 : 1;
     auto neighbor = fetch_node(parent->value_at(neighbor_index));
+    neighbor->page->wlock();  // write-latch neighbor before modifying
 
     if (neighbor->get_size() + node->get_size() >= 2 * node->get_min_size()) {
         redistribute(neighbor.get(), node, parent.get(), index);
         parent.set_dirty(true);
         neighbor.set_dirty(true);
+        neighbor->page->wunlock();
+        parent->page->wunlock();
         return false;
     }
 
@@ -390,6 +430,9 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle *node, Transaction *tr
     bool parent_should_delete = coalesce(raw_neighbor, node, raw_parent, index, transaction, root_is_latched);
     // after coalesce: right node merged into left (neighbor), right deleted
     // raw_neighbor and node may have been swapped by coalesce if index==0
+    // raw_neighbor->page is still write-latched (raw_neighbor was released from guard)
+    raw_neighbor->page->wunlock();
+    raw_parent->page->wunlock();
     destroy_node(raw_neighbor, true);
     destroy_node(raw_parent, true);
     return parent_should_delete;
@@ -519,10 +562,14 @@ bool IxIndexHandle::coalesce(IxNodeHandle *&neighbor_node, IxNodeHandle *&node, 
  */
 Rid IxIndexHandle::get_rid(const Iid &iid) const {
     auto node = fetch_node(iid.page_no);
+    node->page->rlock();
     if (iid.slot_no >= node->get_size()) {
+        node->page->runlock();
         throw IndexEntryNotFoundError();
     }
-    return *node->get_rid(iid.slot_no);
+    Rid rid = *node->get_rid(iid.slot_no);
+    node->page->runlock();
+    return rid;
 }
 
 /**
@@ -630,22 +677,26 @@ void IxIndexHandle::maintain_parent(IxNodeHandle *node) {
     IxNodeHandle *released = nullptr;  // track released guard for cleanup
     while (curr->get_parent_page_no() != IX_NO_PAGE) {
         auto parent = fetch_node(curr->get_parent_page_no());
+        parent->page->wlock();
         int rank = parent->find_child(curr);
         char *parent_key = parent->get_key(rank);
         char *child_first_key = curr->get_key(0);
         if (memcmp(parent_key, child_first_key, file_hdr_->col_tot_len_) == 0) {
             parent.set_dirty(true);
+            parent->page->wunlock();
             break;
         }
         memcpy(parent_key, child_first_key, file_hdr_->col_tot_len_);
         // transfer ownership: destroy previous released node, take new one
         if (released != nullptr) {
+            released->page->wunlock();
             destroy_node(released, true);
         }
         released = parent.release();
         curr = released;
     }
     if (released != nullptr) {
+        released->page->wunlock();
         destroy_node(released, true);
     }
 }

@@ -14,7 +14,7 @@ See the Mulan PSL v2 for more details. */
 #include <fcntl.h>     // for posix_fadvise
 #include <string.h>    // for memset
 #include <sys/stat.h>  // for stat, mkdir
-#include <unistd.h>    // for lseek
+#include <unistd.h>    // for pread, pwrite, ftruncate, fdatasync
 
 #include "defs.h"
 
@@ -28,11 +28,9 @@ DiskManager::DiskManager() { memset(fd2pageno_, 0, MAX_FD * (sizeof(std::atomic<
  * @param {int} num_bytes 要写入磁盘的数据大小
  */
 void DiskManager::write_page(int fd, page_id_t page_no, const char *offset, int num_bytes) {
-    off_t pos = lseek(fd, static_cast<off_t>(page_no) * PAGE_SIZE, SEEK_SET);
-    if (pos < 0) {
-        throw UnixError();
-    }
-    ssize_t bytes_written = write(fd, offset, num_bytes);
+    // pwrite is atomic and thread-safe (no shared seek position)
+    ssize_t bytes_written = pwrite(fd, offset, num_bytes,
+                                   static_cast<off_t>(page_no) * PAGE_SIZE);
     if (bytes_written != num_bytes) {
         throw InternalError("DiskManager::write_page Error");
     }
@@ -46,11 +44,9 @@ void DiskManager::write_page(int fd, page_id_t page_no, const char *offset, int 
  * @param {int} num_bytes 读取的数据量大小
  */
 void DiskManager::read_page(int fd, page_id_t page_no, char *offset, int num_bytes) {
-    off_t pos = lseek(fd, static_cast<off_t>(page_no) * PAGE_SIZE, SEEK_SET);
-    if (pos < 0) {
-        throw UnixError();
-    }
-    ssize_t bytes_read = read(fd, offset, num_bytes);
+    // pread is atomic and thread-safe (no shared seek position)
+    ssize_t bytes_read = pread(fd, offset, num_bytes,
+                               static_cast<off_t>(page_no) * PAGE_SIZE);
     if (bytes_read != num_bytes) {
         throw InternalError("DiskManager::read_page Error");
     }
@@ -234,8 +230,7 @@ int DiskManager::read_log(char *log_data, int size, int offset) {
 
     size = std::min(size, file_size - offset);
     if(size == 0) return 0;
-    lseek(log_fd_, offset, SEEK_SET);
-    ssize_t bytes_read = read(log_fd_, log_data, size);
+    ssize_t bytes_read = pread(log_fd_, log_data, size, static_cast<off_t>(offset));
     assert(bytes_read == size);
     return bytes_read;
 }
@@ -251,9 +246,9 @@ void DiskManager::write_log(char *log_data, int size) {
         log_fd_ = open_file(LOG_FILE_NAME);
     }
 
-    // write from the file_end
-    lseek(log_fd_, 0, SEEK_END);
-    ssize_t bytes_write = write(log_fd_, log_data, size);
+    // Atomic append: pwrite at end-of-file (log manager latch serializes callers)
+    off_t end_offset = lseek(log_fd_, 0, SEEK_END);
+    ssize_t bytes_write = pwrite(log_fd_, log_data, size, end_offset);
     if (bytes_write != size) {
         throw UnixError();
     }
@@ -267,5 +262,5 @@ void DiskManager::truncate_log() {
     if (ftruncate(log_fd_, 0) != 0) {
         throw UnixError();
     }
-    lseek(log_fd_, 0, SEEK_SET);
+    // No lseek needed — all I/O now uses position-independent pread/pwrite
 }

@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <shared_mutex>
+
 #include "common/config.h"
 
 /**
@@ -26,7 +28,7 @@ struct PageId {
     }
 
     std::string toString() {
-        return "{fd: " + std::to_string(fd) + " page_no: " + std::to_string(page_no) + "}"; 
+        return "{fd: " + std::to_string(fd) + " page_no: " + std::to_string(page_no) + "}";
     }
 
     inline int64_t Get() const {
@@ -52,7 +54,7 @@ class Page {
     friend class BufferPoolManager;
 
    public:
-    
+
     Page() { reset_memory(); }
 
     ~Page() = default;
@@ -71,6 +73,15 @@ class Page {
 
     inline void set_page_lsn(lsn_t page_lsn) { memcpy(get_data() + OFFSET_LSN, &page_lsn, sizeof(lsn_t)); }
 
+    // ---- B+Tree latch crabbing ----
+    // Shared (read) lock: used when traversing/searching without modifying
+    inline void rlock() const { latch_.lock_shared(); }
+    inline void runlock() const { latch_.unlock_shared(); }
+
+    // Exclusive (write) lock: used when inserting/deleting/splitting
+    inline void wlock() { latch_.lock(); }
+    inline void wunlock() { latch_.unlock(); }
+
    private:
     void reset_memory() { memset(data_, OFFSET_PAGE_START, PAGE_SIZE); }  // 将data_的PAGE_SIZE个字节填充为0
 
@@ -87,4 +98,8 @@ class Page {
 
     /** The pin count of this page. */
     int pin_count_ = 0;
+
+    /** Per-page read/write latch for B+Tree concurrency control (latch crabbing).
+     *  Shared for readers, exclusive for writers. */
+    mutable std::shared_mutex latch_;
 };
