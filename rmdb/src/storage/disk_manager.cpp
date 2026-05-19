@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <assert.h>    // for assert
 #include <fcntl.h>     // for posix_fadvise
+#include <mutex>       // for std::lock_guard
 #include <string.h>    // for memset
 #include <sys/stat.h>  // for stat, mkdir
 #include <unistd.h>    // for pread, pwrite, ftruncate, fdatasync
@@ -61,18 +62,22 @@ void DiskManager::read_page(int fd, page_id_t page_no, char *offset, int num_byt
  */
 page_id_t DiskManager::allocate_page(int fd) {
     assert(fd >= 0 && fd < MAX_FD);
-    // Check free list first for recycled pages
-    auto it = free_pages_.find(fd);
-    if (it != free_pages_.end() && !it->second.empty()) {
-        page_id_t page_id = it->second.back();
-        it->second.pop_back();
-        return page_id;
+    // Check free list first for recycled pages (lock needed — called from multiple BPM shards)
+    {
+        std::lock_guard<std::mutex> lock(free_pages_mutex_);
+        auto it = free_pages_.find(fd);
+        if (it != free_pages_.end() && !it->second.empty()) {
+            page_id_t page_id = it->second.back();
+            it->second.pop_back();
+            return page_id;
+        }
     }
     return fd2pageno_[fd]++;
 }
 
 void DiskManager::deallocate_page(int fd, page_id_t page_id) {
     assert(fd >= 0 && fd < MAX_FD);
+    std::lock_guard<std::mutex> lock(free_pages_mutex_);
     free_pages_[fd].push_back(page_id);
 }
 

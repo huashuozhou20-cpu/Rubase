@@ -10,8 +10,9 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
-#include <fcntl.h>     
-#include <sys/stat.h>  
+#include <fcntl.h>
+#include <mutex>
+#include <sys/stat.h>
 #include <unistd.h>    
 
 #include <atomic>
@@ -99,4 +100,5 @@ class DiskManager {
     int log_fd_ = -1;                             // WAL日志文件的文件句柄，默认为-1，代表未打开日志文件
     std::atomic<page_id_t> fd2pageno_[MAX_FD]{};  // 文件中已经分配的页面个数，初始值为0
     std::unordered_map<int, std::vector<page_id_t>> free_pages_;  // per-fd free page list
+    std::mutex free_pages_mutex_;  // protects free_pages_ (now accessed from multiple BPM shards)
 };

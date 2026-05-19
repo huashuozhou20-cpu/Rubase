@@ -17,6 +17,7 @@ See the Mulan PSL v2 for more details. */
 #include <chrono>
 #include <condition_variable>
 #include <list>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -27,64 +28,73 @@ See the Mulan PSL v2 for more details. */
 #include "replacer/lru_replacer.h"
 #include "replacer/replacer.h"
 
-class BufferPoolManager {
-   private:
-    size_t pool_size_;      // buffer_pool中可容纳页面的个数，即帧的个数
-    Page *pages_;           // buffer_pool中的Page对象数组，在构造空间中申请内存空间，在析构函数中释放，大小为BUFFER_POOL_SIZE
-    std::unordered_map<PageId, frame_id_t, PageIdHash> page_table_; // 帧号和页面号的映射哈希表，用于根据页面的PageId定位该页面的帧编号
-    std::list<frame_id_t> free_list_;   // 空闲帧编号的链表
-    DiskManager *disk_manager_;
-    Replacer *replacer_;    // buffer_pool的置换策略，当前赛题中为LRU置换策略
-    std::mutex latch_;      // 用于共享数据结构的并发控制
+// Number of independent shards.  Each shard owns a private latch, LRU
+// replacer, page table and free list — eliminating the global-lock
+// bottleneck under mixed read/write workloads.
+static constexpr size_t BPM_SHARD_COUNT = 8;
 
+/**
+ * BufferPoolShard — one independent partition of the buffer pool.
+ */
+class BufferPoolShard {
    public:
-    BufferPoolManager(size_t pool_size, DiskManager *disk_manager)
-        : pool_size_(pool_size), disk_manager_(disk_manager) {
-        // 为buffer pool分配一块连续的内存空间
-        pages_ = new Page[pool_size_];
-        replacer_ = new LRUReplacer(pool_size_);
-        // 初始化时，所有的page都在free_list_中
-        for (size_t i = 0; i < pool_size_; ++i) {
-            free_list_.emplace_back(static_cast<frame_id_t>(i));  // static_cast转换数据类型
-        }
-        start_flush_thread();
-    }
+    BufferPoolShard(size_t pool_size, DiskManager *disk_manager,
+                    Page *pages_start);
 
-    ~BufferPoolManager() {
-        stop_flush_thread();
-        delete[] pages_;
-        delete replacer_;
-    }
+    Page* fetch_page(PageId page_id);
+    bool  unpin_page(PageId page_id, bool is_dirty);
+    bool  flush_page(PageId page_id);
+    Page* new_page(PageId* page_id);   // page_id->page_no MUST already be set
+    bool  delete_page(PageId page_id);
+    void  flush_all_pages(int fd);
 
-    /**
-     * @description: 将目标页面标记为脏页
-     * @param {Page*} page 脏页
-     */
+    std::vector<PageId> collect_dirty_pages();
+    void flush_dirty_pages();
+
+   private:
+    size_t pool_size_;
+    Page*  pages_;          // pointer into the global pages_ array slice
+    std::unordered_map<PageId, frame_id_t, PageIdHash> page_table_;
+    std::list<frame_id_t> free_list_;
+    LRUReplacer replacer_;
+    std::mutex  latch_;
+    DiskManager* disk_manager_;
+
+    bool find_victim_page(frame_id_t* frame_id);
+    void update_page(Page* page, PageId new_page_id, frame_id_t new_frame_id);
+};
+
+/* ------------------------------------------------------------------ */
+
+class BufferPoolManager {
+   public:
+    BufferPoolManager(size_t pool_size, DiskManager* disk_manager);
+    ~BufferPoolManager();
+
     static void mark_dirty(Page* page) { page->is_dirty_ = true; }
 
-   public: 
     Page* fetch_page(PageId page_id);
-
-    bool unpin_page(PageId page_id, bool is_dirty);
-
-    bool flush_page(PageId page_id);
-
+    bool  unpin_page(PageId page_id, bool is_dirty);
+    bool  flush_page(PageId page_id);
     Page* new_page(PageId* page_id);
-
-    bool delete_page(PageId page_id);
-
-    void flush_all_pages(int fd);
+    bool  delete_page(PageId page_id);
+    void  flush_all_pages(int fd);
 
     // Background flush thread
     void start_flush_thread();
     void stop_flush_thread();
 
    private:
-    bool find_victim_page(frame_id_t* frame_id);
+    size_t shard_of(PageId page_id) const {
+        // Stable routing by page_no — distributes pages of a file across shards.
+        return static_cast<size_t>(page_id.page_no) % shards_.size();
+    }
 
-    void update_page(Page* page, PageId new_page_id, frame_id_t new_frame_id);
+    size_t pool_size_;
+    Page*  pages_;
+    DiskManager* disk_manager_;
+    std::vector<std::unique_ptr<BufferPoolShard>> shards_;
 
-    // Background flush thread
     void flush_thread_loop();
     std::thread flush_thread_;
     std::atomic<bool> stop_flush_{false};

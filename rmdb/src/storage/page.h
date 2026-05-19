@@ -52,6 +52,7 @@ struct std::hash<PageId> {
  */
 class Page {
     friend class BufferPoolManager;
+    friend class BufferPoolShard;
 
    public:
 
