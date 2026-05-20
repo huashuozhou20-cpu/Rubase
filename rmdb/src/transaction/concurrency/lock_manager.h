@@ -10,8 +10,12 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include "transaction/transaction.h"
 
 static const std::string GroupLockModeStr[10] = {"NON_LOCK", "IS", "IX", "S", "X", "SIX"};
@@ -43,9 +47,9 @@ class LockManager {
     };
 
 public:
-    LockManager() {}
+    LockManager() { start_deadlock_detector(); }
 
-    ~LockManager() {}
+    ~LockManager() { stop_deadlock_detector(); }
 
     bool lock_shared_on_record(Transaction* txn, const Rid& rid, int tab_fd);
 
@@ -61,6 +65,11 @@ public:
 
     bool unlock(Transaction* txn, LockDataId lock_data_id);
 
+    // Background deadlock detector — start/stop lifecycle
+    void start_deadlock_detector();
+    void stop_deadlock_detector();
+    void CheckDeadlock();
+
 private:
     std::mutex latch_;      // 用于锁表的并发
     std::unordered_map<LockDataId, LockRequestQueue> lock_table_;   // 全局锁表
@@ -70,7 +79,26 @@ private:
     bool is_compatible(LockMode request_mode, GroupLockMode group_mode);
     GroupLockMode lock_mode_to_group_mode(LockMode mode);
 
-    // Deadlock detection: find the best victim in the wait-for graph cycle.
-    // Returns INVALID_TXN_ID if no cycle, otherwise returns the victim's txn_id.
+    // Inline deadlock detection: find the best victim in the wait-for graph cycle.
     txn_id_t find_deadlock_victim(txn_id_t requestor, const LockRequestQueue& queue);
+
+    // --- Background deadlock detector ---
+    // Persistent waits-for graph: waiter → set of holders blocking it
+    std::mutex waits_for_latch_;
+    std::unordered_map<txn_id_t, std::unordered_set<txn_id_t>> waits_for_;
+
+    // Transactions marked for abort by the background detector
+    std::unordered_set<txn_id_t> victims_;
+
+    // Background detector thread
+    std::thread detector_thread_;
+    std::atomic<bool> stop_detector_{false};
+    std::condition_variable detector_cv_;
+    std::mutex detector_mutex_;
+
+    // Edge maintenance helpers
+    void add_wait_edges(txn_id_t waiter, const LockRequestQueue& queue);
+    void remove_all_edges(txn_id_t txn);
+
+    void detector_loop();
 };

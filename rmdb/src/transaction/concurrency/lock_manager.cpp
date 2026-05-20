@@ -10,7 +10,9 @@ See the Mulan PSL v2 for more details. */
 
 #include "lock_manager.h"
 
+#include <chrono>
 #include <functional>
+#include <thread>
 #include <unordered_set>
 
 LockManager::GroupLockMode LockManager::lock_mode_to_group_mode(LockMode mode) {
@@ -62,14 +64,33 @@ void LockManager::update_group_lock_mode(LockRequestQueue& queue) {
     else                     queue.group_lock_mode_ = GroupLockMode::NON_LOCK;
 }
 
+void LockManager::add_wait_edges(txn_id_t waiter, const LockRequestQueue& queue) {
+    std::scoped_lock wl(waits_for_latch_);
+    for (auto& req : queue.request_queue_) {
+        if (req.granted_ && req.txn_id_ != waiter) {
+            waits_for_[waiter].insert(req.txn_id_);
+        }
+    }
+}
+
+void LockManager::remove_all_edges(txn_id_t txn) {
+    std::scoped_lock wl(waits_for_latch_);
+    waits_for_.erase(txn);
+    // Also remove incoming edges pointing to this txn
+    for (auto& [waiter, holders] : waits_for_) {
+        holders.erase(txn);
+    }
+}
+
 bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, LockMode lock_mode) {
     std::unique_lock<std::mutex> lock(latch_);
 
     auto& queue = lock_table_[lock_data_id];
+    txn_id_t my_id = txn->get_transaction_id();
 
     // Check if this transaction already holds a lock on this item
     for (auto& req : queue.request_queue_) {
-        if (req.txn_id_ == txn->get_transaction_id() && req.granted_) {
+        if (req.txn_id_ == my_id && req.granted_) {
             // Same lock type
             if (req.lock_mode_ == lock_mode) {
                 return true;
@@ -78,7 +99,7 @@ bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, 
             if (req.lock_mode_ == LockMode::SHARED && lock_mode == LockMode::EXLUCSIVE) {
                 bool can_upgrade = true;
                 for (auto& other : queue.request_queue_) {
-                    if (other.txn_id_ != txn->get_transaction_id() && other.granted_) {
+                    if (other.txn_id_ != my_id && other.granted_) {
                         can_upgrade = false;
                         break;
                     }
@@ -88,47 +109,58 @@ bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, 
                     update_group_lock_mode(queue);
                     return true;
                 }
-                // Other S holders exist — blocking would create a deadlock cycle
-                // since they may also be trying to upgrade S→X. Abort immediately.
-                throw TransactionAbortException(txn->get_transaction_id(),
-                                                AbortReason::UPGRADE_CONFLICT);
+                throw TransactionAbortException(my_id, AbortReason::UPGRADE_CONFLICT);
             }
-            // Already holds a lock that covers the requested lock mode
-            // X covers everything; SIX covers S and IX; IX covers IS
-            if (req.lock_mode_ == LockMode::EXLUCSIVE) return true;       // X covers all
+            if (req.lock_mode_ == LockMode::EXLUCSIVE) return true;
             if (req.lock_mode_ == LockMode::S_IX) {
                 if (lock_mode == LockMode::SHARED || lock_mode == LockMode::INTENTION_EXCLUSIVE
-                    || lock_mode == LockMode::INTENTION_SHARED) return true;  // SIX covers S, IX, IS
+                    || lock_mode == LockMode::INTENTION_SHARED) return true;
             }
             if (req.lock_mode_ == LockMode::INTENTION_EXCLUSIVE
-                && lock_mode == LockMode::INTENTION_SHARED) return true;  // IX covers IS
+                && lock_mode == LockMode::INTENTION_SHARED) return true;
         }
     }
 
     // Wait until the lock request is compatible with the current group lock mode
     while (!is_compatible(lock_mode, queue.group_lock_mode_)) {
-        // Check for deadlock
-        txn_id_t victim = find_deadlock_victim(txn->get_transaction_id(), queue);
+        // Check for deadlock (inline)
+        txn_id_t victim = find_deadlock_victim(my_id, queue);
         if (victim != INVALID_TXN_ID) {
+            remove_all_edges(my_id);
             throw TransactionAbortException(victim, AbortReason::DEADLOCK_PREVENTION);
         }
+
+        // Add waits-for edges BEFORE blocking
+        add_wait_edges(my_id, queue);
+
         // Add an ungranted request so deadlock detection can see us
-        LockRequest wait_req(txn->get_transaction_id(), lock_mode);
+        LockRequest wait_req(my_id, lock_mode);
         wait_req.granted_ = false;
         queue.request_queue_.push_back(wait_req);
+
         // Block until something changes in this lock queue
         queue.cv_.wait(lock);
+
         // Remove our ungranted request
         for (auto it = queue.request_queue_.begin(); it != queue.request_queue_.end(); ++it) {
-            if (it->txn_id_ == txn->get_transaction_id() && !it->granted_) {
+            if (it->txn_id_ == my_id && !it->granted_) {
                 queue.request_queue_.erase(it);
                 break;
             }
         }
+
+        // Remove waits-for edges after waking
+        remove_all_edges(my_id);
+
+        // Check if background detector marked us as victim
+        if (victims_.count(my_id)) {
+            victims_.erase(my_id);
+            throw TransactionAbortException(my_id, AbortReason::DEADLOCK_PREVENTION);
+        }
     }
 
     // Grant the lock
-    LockRequest new_req(txn->get_transaction_id(), lock_mode);
+    LockRequest new_req(my_id, lock_mode);
     new_req.granted_ = true;
     queue.request_queue_.push_back(new_req);
     update_group_lock_mode(queue);
@@ -252,7 +284,6 @@ txn_id_t LockManager::find_deadlock_victim(txn_id_t requestor, const LockRequest
     if (!has_cycle) return INVALID_TXN_ID;
 
     // Victim selection: choose the youngest transaction (highest txn_id) in the cycle.
-    // Younger transactions have done less work, so aborting them is cheaper.
     txn_id_t victim = INVALID_TXN_ID;
     for (auto txn : cycle_members) {
         if (txn > victim) victim = txn;
@@ -290,4 +321,108 @@ bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
     }
 
     return false;
+}
+
+// ============================================================================
+// Background deadlock detector
+// ============================================================================
+
+void LockManager::CheckDeadlock() {
+    // Snapshot the waits-for graph under its latch
+    std::unordered_map<txn_id_t, std::unordered_set<txn_id_t>> graph;
+    {
+        std::scoped_lock wl(waits_for_latch_);
+        graph = waits_for_;
+    }
+    if (graph.empty()) return;
+
+    // DFS with three-color marking: 0=unvisited, 1=in-stack, 2=done
+    std::unordered_map<txn_id_t, int> color;
+    std::unordered_map<txn_id_t, txn_id_t> parent;
+    std::vector<txn_id_t> cycle;
+
+    std::function<bool(txn_id_t)> dfs = [&](txn_id_t u) -> bool {
+        color[u] = 1;  // in recursion stack
+        for (auto v : graph[u]) {
+            if (color[v] == 1) {
+                // Back edge: cycle found. Walk parent chain to collect members.
+                cycle.push_back(v);
+                txn_id_t cur = u;
+                while (cur != v) {
+                    cycle.push_back(cur);
+                    auto it = parent.find(cur);
+                    if (it == parent.end() || it->second == cur) break;
+                    cur = it->second;
+                }
+                return true;
+            }
+            if (color[v] == 0) {
+                parent[v] = u;
+                if (dfs(v)) return true;
+            }
+        }
+        color[u] = 2;  // done
+        return false;
+    };
+
+    bool has_cycle = false;
+    for (auto& [u, _] : graph) {
+        if (color[u] == 0) {
+            if (dfs(u)) { has_cycle = true; break; }
+        }
+    }
+
+    if (!has_cycle) return;
+
+    // Victim: youngest (highest txn_id) in the cycle
+    txn_id_t victim = INVALID_TXN_ID;
+    for (auto id : cycle) {
+        if (id > victim) victim = id;
+    }
+    if (victim == INVALID_TXN_ID) return;
+    {
+        std::scoped_lock lock(latch_);
+        victims_.insert(victim);
+
+        // Find the queue where the victim has an ungranted request and wake it
+        for (auto& [id, queue] : lock_table_) {
+            for (auto& req : queue.request_queue_) {
+                if (req.txn_id_ == victim && !req.granted_) {
+                    queue.cv_.notify_all();
+                    goto done_wake;
+                }
+            }
+        }
+        done_wake:;
+    }
+
+    // Clean up the victim's waits-for edges
+    remove_all_edges(victim);
+}
+
+void LockManager::detector_loop() {
+    while (!stop_detector_.load()) {
+        {
+            std::unique_lock<std::mutex> lock(detector_mutex_);
+            detector_cv_.wait_for(lock, std::chrono::milliseconds(100), [this] {
+                return stop_detector_.load();
+            });
+        }
+        if (stop_detector_.load()) break;
+        CheckDeadlock();
+    }
+}
+
+void LockManager::start_deadlock_detector() {
+    if (detector_thread_.joinable()) return;
+    stop_detector_ = false;
+    detector_thread_ = std::thread(&LockManager::detector_loop, this);
+}
+
+void LockManager::stop_deadlock_detector() {
+    stop_detector_ = true;
+    detector_cv_.notify_all();
+    if (detector_thread_.joinable()) {
+        detector_thread_.join();
+    }
 }
