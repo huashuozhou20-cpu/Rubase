@@ -13,41 +13,66 @@ See the Mulan PSL v2 for more details. */
 
 auto Watermark::AddTxn(timestamp_t read_ts) -> void {
     std::scoped_lock lock(mtx_);
-    if (current_reads_.find(read_ts) == current_reads_.end()) {
+    auto it = current_reads_.find(read_ts);
+    if (it == current_reads_.end()) {
         current_reads_[read_ts] = 1;
+        // If this new read_ts is the smallest active timestamp, lower the watermark.
         if (read_ts < watermark_) {
             watermark_ = read_ts;
         }
     } else {
-        current_reads_[read_ts]++;
+        // Multiple transactions can share the same read_ts (rare but possible
+        // when next_timestamp_ wraps or in synthetic test scenarios).
+        it->second++;
     }
 }
 
 auto Watermark::RemoveTxn(timestamp_t read_ts) -> void {
     std::scoped_lock lock(mtx_);
     auto it = current_reads_.find(read_ts);
-    if (it != current_reads_.end()) {
-        it->second--;
-        if (it->second == 0) {
-            current_reads_.erase(it);
-            if (current_reads_.empty()) {
-                watermark_ = commit_ts_;
-            } else {
-                watermark_ = current_reads_.begin()->first;
-            }
-        }
+    if (it == current_reads_.end()) {
+        // Not found — can happen if the transaction was never added
+        // or was already removed. Harmless no-op.
+        return;
+    }
+    it->second--;
+    if (it->second > 0) {
+        // Other transactions still hold this read_ts. Watermark unchanged.
+        return;
+    }
+    // Last transaction with this read_ts has finished.
+    current_reads_.erase(it);
+    if (current_reads_.empty()) {
+        // No active transactions remain — advance watermark to the latest
+        // known commit timestamp. This is the GC safety signal: all txns
+        // with commit_ts below this watermark are invisible to every
+        // possible reader.
+        watermark_ = commit_ts_;
+    } else {
+        // Advance watermark to the next-smallest active read_ts.
+        // std::map is ordered, so begin()->first is the minimum key.
+        watermark_ = current_reads_.begin()->first;
     }
 }
 
 auto Watermark::UpdateCommitTs(timestamp_t commit_ts) -> void {
     std::scoped_lock lock(mtx_);
-    commit_ts_ = commit_ts;
+    // Enforce monotonicity: concurrent commits may call UpdateCommitTs
+    // out of order (a later commit with higher ts may reach this method
+    // before an earlier commit). We must never allow commit_ts_ to regress,
+    // or the watermark would decrease and GC would prematurely purge
+    // still-visible undo logs.
+    if (commit_ts > commit_ts_) {
+        commit_ts_ = commit_ts;
+    }
+    // If no active readers exist, advance the watermark to the latest
+    // commit timestamp so GC can clean up.
     if (current_reads_.empty() && commit_ts_ > watermark_) {
         watermark_ = commit_ts_;
     }
 }
 
-auto Watermark::GetWatermark() -> timestamp_t {
+auto Watermark::GetWatermark() const -> timestamp_t {
     std::scoped_lock lock(mtx_);
     return watermark_;
 }

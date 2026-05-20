@@ -247,21 +247,24 @@ timestamp_t TransactionManager::GetWatermark() {
 
 void TransactionManager::GarbageCollection() {
     timestamp_t watermark = GetWatermark();
-    if (watermark == INVALID_TS) return;
+    // watermark_ starts at 0 (constructor default). Skip GC until at least
+    // one commit has advanced it past the initial value.
+    if (watermark <= 0) return;
 
     std::scoped_lock lock(latch_);
 
-    std::vector<txn_id_t> to_erase;
+    std::vector<std::pair<txn_id_t, Transaction*>> to_erase;
     for (auto& [txn_id, txn] : TransactionManager::txn_map) {
         auto state = txn->get_state();
         if (state == TransactionState::COMMITTED || state == TransactionState::ABORTED) {
             if (txn->get_commit_ts() < watermark) {
-                to_erase.push_back(txn_id);
+                to_erase.emplace_back(txn_id, txn);
             }
         }
     }
 
-    for (auto txn_id : to_erase) {
+    for (auto& [txn_id, txn] : to_erase) {
         TransactionManager::txn_map.erase(txn_id);
+        delete txn;  // free the Transaction object allocated in begin()
     }
 }
