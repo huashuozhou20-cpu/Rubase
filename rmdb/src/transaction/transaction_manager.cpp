@@ -8,6 +8,8 @@ EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
+#include <unordered_set>
+
 #include "transaction_manager.h"
 #include "record/rm_file_handle.h"
 #include "system/sm_manager.h"
@@ -77,6 +79,10 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         lock_manager_->unlock(txn, lock_data_id);
     }
     txn->get_lock_set()->clear();
+    // Free WriteRecord objects to prevent memory leak
+    for (auto* wr : *txn->get_write_set()) {
+        delete wr;
+    }
     txn->get_write_set()->clear();
 
     txn->set_state(TransactionState::COMMITTED);
@@ -87,7 +93,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         running_txns_.UpdateCommitTs(txn->get_commit_ts());
         // Periodic GC: clean up committed/aborted txns below the watermark
         static std::atomic<int> gc_counter{0};
-        if (++gc_counter % 64 == 0) {
+        if (++gc_counter % 16 == 0) {
             GarbageCollection();
         }
     } else {
@@ -141,6 +147,11 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         running_txns_.RemoveTxn(txn->get_read_ts());
         running_txns_.UpdateCommitTs(txn->get_commit_ts());
+        // Periodic GC: same trigger as commit path
+        static std::atomic<int> gc_counter_abort{0};
+        if (++gc_counter_abort % 16 == 0) {
+            GarbageCollection();
+        }
     } else {
         std::scoped_lock lock(latch_);
         TransactionManager::txn_map.erase(txn->get_transaction_id());
@@ -253,20 +264,64 @@ void TransactionManager::GarbageCollection() {
     // one commit has advanced it past the initial value.
     if (watermark <= 0) return;
 
-    std::scoped_lock lock(latch_);
+    std::unordered_set<txn_id_t> deleted_ids;
 
-    std::vector<std::pair<txn_id_t, Transaction*>> to_erase;
-    for (auto& [txn_id, txn] : TransactionManager::txn_map) {
-        auto state = txn->get_state();
-        if (state == TransactionState::COMMITTED || state == TransactionState::ABORTED) {
-            if (txn->get_commit_ts() < watermark) {
-                to_erase.emplace_back(txn_id, txn);
+    {
+        std::scoped_lock lock(latch_);
+
+        std::vector<std::pair<txn_id_t, Transaction*>> to_erase;
+        for (auto& [txn_id, txn] : TransactionManager::txn_map) {
+            auto state = txn->get_state();
+            if (state == TransactionState::COMMITTED || state == TransactionState::ABORTED) {
+                if (txn->get_commit_ts() < watermark) {
+                    to_erase.emplace_back(txn_id, txn);
+                }
             }
+        }
+
+        for (auto& [txn_id, txn] : to_erase) {
+            TransactionManager::txn_map.erase(txn_id);
+            deleted_ids.insert(txn_id);
+            delete txn;  // free Transaction + undo_logs_ vector
         }
     }
 
-    for (auto& [txn_id, txn] : to_erase) {
-        TransactionManager::txn_map.erase(txn_id);
-        delete txn;  // free the Transaction object allocated in begin()
+    // Phase 2: clean up version_info_ entries whose prev_txn_ has been GC'd
+    if (!deleted_ids.empty()) {
+        std::unique_lock<std::shared_mutex> map_lock(version_info_mutex_);
+
+        std::vector<page_id_t> empty_pages;
+        for (auto& [page_no, page_info] : version_info_) {
+            std::unique_lock<std::shared_mutex> page_lock(page_info->mutex_);
+
+            std::vector<slot_offset_t> stale_slots;
+            for (auto& [slot_no, vlink] : page_info->prev_version_) {
+                txn_id_t prev_txn = vlink.prev_.prev_txn_;
+                if (prev_txn == INVALID_TXN_ID) continue;
+                // Stale if the owning txn was GC'd (or already gone)
+                if (deleted_ids.count(prev_txn)) {
+                    stale_slots.push_back(slot_no);
+                    continue;
+                }
+                {
+                    std::scoped_lock txn_lock(latch_);
+                    if (TransactionManager::txn_map.find(prev_txn) == TransactionManager::txn_map.end()) {
+                        stale_slots.push_back(slot_no);
+                    }
+                }
+            }
+
+            for (auto slot : stale_slots) {
+                page_info->prev_version_.erase(slot);
+            }
+
+            if (page_info->prev_version_.empty()) {
+                empty_pages.push_back(page_no);
+            }
+        }
+
+        for (auto page : empty_pages) {
+            version_info_.erase(page);
+        }
     }
 }

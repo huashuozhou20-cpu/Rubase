@@ -26,6 +26,7 @@ public:
         : lock_mgr_(lock_mgr), log_mgr_(log_mgr), txn_(txn),
           txn_mgr_(nullptr), data_send_(data_send), offset_(offset) {
             ellipsis_ = false;
+            is_for_update_ = false;
           }
 
     LockManager *lock_mgr_;
@@ -35,4 +36,5 @@ public:
     char *data_send_;
     int *offset_;
     bool ellipsis_;
+    bool is_for_update_;
 };

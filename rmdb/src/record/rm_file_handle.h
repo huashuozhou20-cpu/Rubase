@@ -75,6 +75,9 @@ class RmFileHandle {
 
     std::unique_ptr<RmRecord> get_record(const Rid &rid, Context *context) const;
 
+    // FOR UPDATE current read: acquires IX + X locks, reads the latest version
+    std::unique_ptr<RmRecord> get_record_for_update(const Rid &rid, Context *context) const;
+
     // Lock-free snapshot read for MVCC — reads slot data without acquiring 2PL locks.
     std::unique_ptr<RmRecord> get_record_snapshot(const Rid &rid) const;
 

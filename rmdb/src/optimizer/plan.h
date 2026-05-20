@@ -162,6 +162,7 @@ class DMLPlan : public Plan
         std::vector<Condition> conds_;
         std::vector<SetClause> set_clauses_;
         std::vector<std::string> col_names_;
+        bool is_for_update_ = false;
 };
 
 // ddl语句, 包括create/drop table; create/drop index;

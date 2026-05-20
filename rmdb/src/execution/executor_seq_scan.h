@@ -276,6 +276,8 @@ class SeqScanExecutor : public AbstractExecutor {
             && context_->txn_->is_read_only();
     }
 
+    bool use_for_update() const { return context_->is_for_update_; }
+
     void beginTuple() override {
         scan_ = std::make_unique<RmScan>(fh_);
         if (scan_->is_end()) {
@@ -284,19 +286,21 @@ class SeqScanExecutor : public AbstractExecutor {
         }
         is_end_ = false;
         rid_ = scan_->rid();
-        if (use_mvcc_read()) {
+        if (use_for_update()) {
+            auto rec = fh_->get_record_for_update(rid_, context_);
+            if (!check_all_conds(*rec)) {
+                nextTuple();
+            }
+        } else if (use_mvcc_read()) {
             auto rec = get_visible_record(rid_);
             if (!rec || !check_all_conds(*rec)) {
                 nextTuple();
             }
         } else {
-            // Lazy-lock: first check conditions on snapshot (no S lock),
-            // only acquire S lock on records that actually match.
             auto snap = fh_->get_record_snapshot(rid_);
             if (!snap || !check_all_conds(*snap)) {
                 nextTuple();
             } else {
-                // Conditions matched — acquire S lock and re-verify.
                 auto rec = fh_->get_record(rid_, context_);
                 if (!check_all_conds(*rec)) {
                     nextTuple();
@@ -306,7 +310,8 @@ class SeqScanExecutor : public AbstractExecutor {
     }
 
     void nextTuple() override {
-        bool mvcc = use_mvcc_read();
+        bool for_update = use_for_update();
+        bool mvcc = !for_update && use_mvcc_read();
         while (true) {
             scan_->next();
             if (scan_->is_end()) {
@@ -314,11 +319,13 @@ class SeqScanExecutor : public AbstractExecutor {
                 return;
             }
             rid_ = scan_->rid();
-            if (mvcc) {
+            if (for_update) {
+                auto rec = fh_->get_record_for_update(rid_, context_);
+                if (check_all_conds(*rec)) return;
+            } else if (mvcc) {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;
             } else {
-                // Lazy-lock: snapshot check first, S lock only on match.
                 auto snap = fh_->get_record_snapshot(rid_);
                 if (!snap || !check_all_conds(*snap)) continue;
                 auto rec = fh_->get_record(rid_, context_);
@@ -344,6 +351,9 @@ class SeqScanExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
+        if (use_for_update()) {
+            return fh_->get_record(rid_, context_);
+        }
         if (use_mvcc_read()) {
             return get_visible_record(rid_);
         }

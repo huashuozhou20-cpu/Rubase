@@ -273,6 +273,8 @@ class IndexScanExecutor : public AbstractExecutor {
             && context_->txn_->is_read_only();
     }
 
+    bool use_for_update() const { return context_->is_for_update_; }
+
     void beginTuple() override {
         auto ih = sm_manager_->ihs_
                       .at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols))
@@ -303,7 +305,8 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     void nextTuple() override {
-        bool mvcc = use_mvcc_read();
+        bool for_update = use_for_update();
+        bool mvcc = !for_update && use_mvcc_read();
         while (true) {
             scan_->next();
             if (scan_->is_end()) {
@@ -311,11 +314,13 @@ class IndexScanExecutor : public AbstractExecutor {
                 return;
             }
             rid_ = scan_->rid();
-            if (mvcc) {
+            if (for_update) {
+                auto rec = fh_->get_record_for_update(rid_, context_);
+                if (check_all_conds(*rec)) return;
+            } else if (mvcc) {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;
             } else {
-                // Lazy-lock: snapshot check first, S lock only on match.
                 auto snap = fh_->get_record_snapshot(rid_);
                 if (!snap || !check_all_conds(*snap)) continue;
                 auto rec = fh_->get_record(rid_, context_);
@@ -332,6 +337,9 @@ class IndexScanExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
+        if (use_for_update()) {
+            return fh_->get_record(rid_, context_);
+        }
         if (use_mvcc_read()) {
             return get_visible_record(rid_);
         }

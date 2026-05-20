@@ -551,8 +551,9 @@ struct SelectStmt : public TreeNode {
     std::shared_ptr<LimitClause> limit;
     bool has_distinct;
     bool is_agg;
+    bool is_for_update;
 
-    SelectStmt() : has_distinct(false), is_agg(false) {}
+    SelectStmt() : has_distinct(false), is_agg(false), is_for_update(false) {}
 
     SelectStmt(std::vector<std::shared_ptr<Col>> cols_,
                std::vector<std::string> tabs_,
@@ -560,7 +561,7 @@ struct SelectStmt : public TreeNode {
                std::shared_ptr<OrderBy> order_)
         : cols(std::move(cols_)), tabs(std::move(tabs_)), cond(std::move(cond_)),
           order(std::move(order_)),
-          has_distinct(false), is_agg(false) {}
+          has_distinct(false), is_agg(false), is_for_update(false) {}
 };
 
 // ---- SET 配置语句 ----

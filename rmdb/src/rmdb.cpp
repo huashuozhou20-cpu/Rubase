@@ -320,6 +320,15 @@ void *client_handler(void *sock_fd) {
                         pthread_mutex_unlock(buffer_mutex);
                         // 优化器
                         std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
+
+                        // FOR UPDATE: mark txn read-write + flag context for X-lock routing
+                        if (auto dml = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+                            if (dml->is_for_update_ && context->txn_) {
+                                context->txn_->set_read_only(false);
+                                context->is_for_update_ = true;
+                            }
+                        }
+
                         // portal
                         std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
                         portal->run(portalStmt, ql_manager.get(), &txn_id, context);

@@ -33,6 +33,26 @@ std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* cont
 }
 
 /**
+ * @description: FOR UPDATE current read — acquires IX + X locks and reads the latest
+ * committed version from the slot. Blocks concurrent FOR UPDATE / DML on the same row.
+ */
+std::unique_ptr<RmRecord> RmFileHandle::get_record_for_update(const Rid& rid, Context* context) const {
+    if (context != nullptr) {
+        context->lock_mgr_->lock_IX_on_table(context->txn_, fd_);
+        context->lock_mgr_->lock_exclusive_on_record(context->txn_, rid, fd_);
+    }
+    RmPageHandle page_handle = fetch_page_handle(rid.page_no);
+    if (!Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
+        buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+        throw RecordNotFoundError(rid.page_no, rid.slot_no);
+    }
+    char* slot = page_handle.get_slot(rid.slot_no);
+    auto rec = std::make_unique<RmRecord>(file_hdr_.record_size, slot);
+    buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+    return rec;
+}
+
+/**
  * @description: Lock-free snapshot read — reads the current version from the slot
  * without acquiring 2PL locks. Used by MVCC snapshot scans.
  */

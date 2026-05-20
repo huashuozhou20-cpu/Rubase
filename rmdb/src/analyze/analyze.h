@@ -50,6 +50,8 @@ class Query{
     bool has_distinct = false;
     // select 中有聚合函数
     bool has_agg = false;
+    // SELECT ... FOR UPDATE
+    bool is_for_update = false;
 
     Query(){}
 

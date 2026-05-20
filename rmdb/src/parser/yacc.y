@@ -25,7 +25,7 @@ using namespace ast;
 %token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP DEFAULT PRIMARY KEY AUTO_INCREMENT AS CONCAT VIEW UNIQUE DATE TEXT
 %token TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE
-%token AVG BETWEEN COUNT DISTINCT FULL GROUP HAVING IN INNER IS LEFT LIKE LIMIT
+%token AVG BETWEEN COUNT DISTINCT FULL FOR GROUP HAVING IN INNER IS LEFT LIKE LIMIT
 %token MAX MIN NOT OFFSET ON OR RIGHT SUM
 
 // non-keywords (operators)
@@ -66,7 +66,7 @@ using namespace ast;
 %type <sv_agg> aggExpr
 %type <sv_agg_type> aggType
 %type <sv_int> joinType
-%type <sv_bool> optDistinct
+%type <sv_bool> optDistinct optForUpdateClause
 
 // intermediate non-terminals for expression and condition trees
 %type <sv_cond> cond_or cond_and cond_not cond_base
@@ -193,7 +193,7 @@ dml:
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
     |   SELECT optDistinct selectItems
-        FROM fromList optJoinList optWhereClause optGroupBy optHaving opt_order_clause optLimit
+        FROM fromList optJoinList optWhereClause optGroupBy optHaving opt_order_clause optLimit optForUpdateClause
     {
         auto stmt = std::make_shared<SelectStmt>();
         stmt->has_distinct = $2;
@@ -223,6 +223,7 @@ dml:
         stmt->having = $9;
         stmt->order = $10;
         stmt->limit = $11;
+        stmt->is_for_update = $12;
         $$ = stmt;
     }
     ;
@@ -602,6 +603,11 @@ aggExpr:
 optDistinct:
         /* empty */     { $$ = false; }
     |   DISTINCT        { $$ = true; }
+    ;
+
+optForUpdateClause:
+        /* empty */     { $$ = false; }
+    |   FOR UPDATE      { $$ = true; }
     ;
 
 selectItems:

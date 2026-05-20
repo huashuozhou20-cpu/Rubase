@@ -91,6 +91,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         // 标记聚合和 DISTINCT
         query->has_agg = x->is_agg;
         query->has_distinct = x->has_distinct;
+        query->is_for_update = x->is_for_update;
 
         std::vector<ColMeta> all_cols;
         get_all_cols(query->tables, all_cols);
