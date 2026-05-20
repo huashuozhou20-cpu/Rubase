@@ -15,9 +15,13 @@ auto Watermark::AddTxn(timestamp_t read_ts) -> void {
     std::scoped_lock lock(mtx_);
     auto it = current_reads_.find(read_ts);
     if (it == current_reads_.end()) {
+        bool was_empty = current_reads_.empty();
         current_reads_[read_ts] = 1;
-        // If this new read_ts is the smallest active timestamp, lower the watermark.
-        if (read_ts < watermark_) {
+        // If the map was empty, the watermark may be stale (left at an old
+        // commit_ts_ by the last RemoveTxn). Always advance to the new
+        // read_ts, which is now the sole active timestamp.
+        // Otherwise, lower the watermark only if this is the new minimum.
+        if (was_empty || read_ts < watermark_) {
             watermark_ = read_ts;
         }
     } else {
