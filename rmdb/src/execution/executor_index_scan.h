@@ -238,7 +238,10 @@ class IndexScanExecutor : public AbstractExecutor {
         UndoLink roll_ptr;
         memcpy(&roll_ptr, rec->data + roll_ptr_offset(rec->size), sizeof(UndoLink));
 
+        int chain_len = 0;
         while (roll_ptr.IsValid()) {
+            if (++chain_len > 64) return nullptr;
+
             auto undo_opt = context_->txn_mgr_->GetUndoLogOptional(roll_ptr);
             if (!undo_opt.has_value()) return nullptr;
 
@@ -247,16 +250,14 @@ class IndexScanExecutor : public AbstractExecutor {
             if (undo.old_data_.empty()) return nullptr;
 
             int old_size = static_cast<int>(undo.old_data_.size());
+            if (old_size < RM_HIDDEN_TOTAL_SIZE) return nullptr;
+
             const char* old_ptr = undo.old_data_.data();
             txn_id_t old_trx_id;
             memcpy(&old_trx_id, old_ptr + trx_id_offset(old_size), sizeof(txn_id_t));
 
             if (context_->txn_->is_visible(old_trx_id)) {
-                auto result = std::make_unique<RmRecord>();
-                result->size = old_size;
-                result->data = const_cast<char*>(old_ptr);
-                result->allocated_ = false;
-                return result;
+                return std::make_unique<RmRecord>(old_size, const_cast<char*>(old_ptr));
             }
 
             roll_ptr = undo.prev_version_;
