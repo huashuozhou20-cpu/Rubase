@@ -240,7 +240,7 @@ class IndexScanExecutor : public AbstractExecutor {
 
         int chain_len = 0;
         while (roll_ptr.IsValid()) {
-            if (++chain_len > 64) return nullptr;
+            if (++chain_len > 100000) return nullptr;
 
             auto undo_opt = context_->txn_mgr_->GetUndoLogOptional(roll_ptr);
             if (!undo_opt.has_value()) return nullptr;

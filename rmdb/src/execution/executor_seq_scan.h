@@ -236,8 +236,9 @@ class SeqScanExecutor : public AbstractExecutor {
 
         int chain_len = 0;
         while (roll_ptr.IsValid()) {
-            // Safety valve: abandon chain if it exceeds a reasonable depth.
-            if (++chain_len > 64) return nullptr;
+            // Safety valve: abandon if chain exceeds extreme depth
+            // (e.g. 8 writers × 45s pinned watermark × ~500 tps ≈ 180k updates).
+            if (++chain_len > 100000) return nullptr;
 
             auto undo_opt = context_->txn_mgr_->GetUndoLogOptional(roll_ptr);
             if (!undo_opt.has_value()) return nullptr;
