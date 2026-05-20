@@ -46,7 +46,8 @@ struct UndoLog {
   std::vector<bool> modified_fields_;
   /* 修改后的字段 */
   std::vector<Value> tuple_;
-  RmRecord* tuple_test_;
+  /* 旧版本记录的完整数据（含隐藏字段）—— flat buffer，避免 RmRecord 包装开销 */
+  std::vector<char> old_data_;
   /* 此撤销日志的时间戳 */
   timestamp_t ts_{INVALID_TS};
   /* 撤销日志的前一个版本 */

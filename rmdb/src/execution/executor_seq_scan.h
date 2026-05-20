@@ -240,20 +240,20 @@ class SeqScanExecutor : public AbstractExecutor {
 
             auto& undo = *undo_opt;
             if (undo.is_deleted_) return nullptr;
-            if (!undo.tuple_test_) return nullptr;
+            if (undo.old_data_.empty()) return nullptr;
 
             // Read trx_id from the old version's hidden fields
-            int old_size = undo.tuple_test_->size;
+            int old_size = static_cast<int>(undo.old_data_.size());
+            const char* old_ptr = undo.old_data_.data();
             txn_id_t old_trx_id;
-            memcpy(&old_trx_id,
-                   undo.tuple_test_->data + trx_id_offset(old_size),
-                   sizeof(txn_id_t));
+            memcpy(&old_trx_id, old_ptr + trx_id_offset(old_size), sizeof(txn_id_t));
 
             if (context_->txn_->is_visible(old_trx_id)) {
-                // Return a (shallow, non-owning) copy of the old record data.
+                // Return a (shallow, non-owning) view of the old record data.
+                // old_data_ is stable inside the owning Transaction's undo_logs_ vector.
                 auto result = std::make_unique<RmRecord>();
                 result->size = old_size;
-                result->data = undo.tuple_test_->data;
+                result->data = const_cast<char*>(old_ptr);
                 result->allocated_ = false;
                 return result;
             }
@@ -286,9 +286,17 @@ class SeqScanExecutor : public AbstractExecutor {
                 nextTuple();
             }
         } else {
-            auto rec = fh_->get_record(rid_, context_);
-            if (!check_all_conds(*rec)) {
+            // Lazy-lock: first check conditions on snapshot (no S lock),
+            // only acquire S lock on records that actually match.
+            auto snap = fh_->get_record_snapshot(rid_);
+            if (!snap || !check_all_conds(*snap)) {
                 nextTuple();
+            } else {
+                // Conditions matched — acquire S lock and re-verify.
+                auto rec = fh_->get_record(rid_, context_);
+                if (!check_all_conds(*rec)) {
+                    nextTuple();
+                }
             }
         }
     }
@@ -306,6 +314,9 @@ class SeqScanExecutor : public AbstractExecutor {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;
             } else {
+                // Lazy-lock: snapshot check first, S lock only on match.
+                auto snap = fh_->get_record_snapshot(rid_);
+                if (!snap || !check_all_conds(*snap)) continue;
                 auto rec = fh_->get_record(rid_, context_);
                 if (check_all_conds(*rec)) return;
             }

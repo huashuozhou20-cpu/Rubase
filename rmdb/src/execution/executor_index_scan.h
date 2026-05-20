@@ -244,18 +244,17 @@ class IndexScanExecutor : public AbstractExecutor {
 
             auto& undo = *undo_opt;
             if (undo.is_deleted_) return nullptr;
-            if (!undo.tuple_test_) return nullptr;
+            if (undo.old_data_.empty()) return nullptr;
 
-            int old_size = undo.tuple_test_->size;
+            int old_size = static_cast<int>(undo.old_data_.size());
+            const char* old_ptr = undo.old_data_.data();
             txn_id_t old_trx_id;
-            memcpy(&old_trx_id,
-                   undo.tuple_test_->data + trx_id_offset(old_size),
-                   sizeof(txn_id_t));
+            memcpy(&old_trx_id, old_ptr + trx_id_offset(old_size), sizeof(txn_id_t));
 
             if (context_->txn_->is_visible(old_trx_id)) {
                 auto result = std::make_unique<RmRecord>();
                 result->size = old_size;
-                result->data = undo.tuple_test_->data;
+                result->data = const_cast<char*>(old_ptr);
                 result->allocated_ = false;
                 return result;
             }
@@ -315,6 +314,9 @@ class IndexScanExecutor : public AbstractExecutor {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;
             } else {
+                // Lazy-lock: snapshot check first, S lock only on match.
+                auto snap = fh_->get_record_snapshot(rid_);
+                if (!snap || !check_all_conds(*snap)) continue;
                 auto rec = fh_->get_record(rid_, context_);
                 if (check_all_conds(*rec)) return;
             }

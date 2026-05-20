@@ -138,7 +138,7 @@ void RmFileHandle::delete_record(const Rid& rid, Context* context) {
         // Snapshot the old version before deletion
         UndoLog undo_log;
         undo_log.is_deleted_ = true;
-        undo_log.tuple_test_ = new RmRecord(file_hdr_.record_size, slot);
+        undo_log.old_data_.assign(slot, slot + file_hdr_.record_size);
         undo_log.ts_ = context->txn_->get_start_ts();
         memcpy(&undo_log.prev_version_, slot + roll_ptr_offset(file_hdr_.record_size),
                sizeof(UndoLink));
@@ -183,7 +183,7 @@ void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
         // Snapshot the old version (user data + hidden fields) before overwriting
         UndoLog undo_log;
         undo_log.is_deleted_ = false;
-        undo_log.tuple_test_ = new RmRecord(file_hdr_.record_size, slot);
+        undo_log.old_data_.assign(slot, slot + file_hdr_.record_size);
         undo_log.ts_ = context->txn_->get_start_ts();
         // Chain old roll_pointer into this undo log's prev_version
         memcpy(&undo_log.prev_version_, slot + roll_ptr_offset(file_hdr_.record_size),
