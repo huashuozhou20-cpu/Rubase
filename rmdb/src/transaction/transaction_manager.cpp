@@ -68,8 +68,9 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     txn->set_state(TransactionState::SHRINKING);
 
     auto* commit_log = new CommitLogRecord(txn->get_transaction_id());
-    log_manager->add_log_to_buffer(commit_log);
+    lsn_t my_lsn = log_manager->add_log_to_buffer(commit_log);
     log_manager->flush_log_to_disk();
+    log_manager->wait_for_persist_lsn(my_lsn);  // 确保 Commit 日志落盘后才返回成功
 
     // Release all locks
     for (auto& lock_data_id : *txn->get_lock_set()) {
@@ -124,8 +125,9 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     }
 
     auto* abort_log = new AbortLogRecord(txn->get_transaction_id());
-    log_manager->add_log_to_buffer(abort_log);
+    lsn_t my_lsn = log_manager->add_log_to_buffer(abort_log);
     log_manager->flush_log_to_disk();
+    log_manager->wait_for_persist_lsn(my_lsn);
 
     // Release all locks
     for (auto& lock_data_id : *txn->get_lock_set()) {

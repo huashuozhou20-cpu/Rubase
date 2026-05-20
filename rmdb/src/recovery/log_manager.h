@@ -372,6 +372,7 @@ public:
 
     lsn_t add_log_to_buffer(LogRecord* log_record);
     void flush_log_to_disk();
+    void wait_for_persist_lsn(lsn_t target);
 
     LogBuffer* get_log_buffer() { return &log_buffer_; }
 
@@ -388,6 +389,7 @@ private:
     // Group commit (Leader-Follower)
     bool is_flushing_{false};
     std::condition_variable group_commit_cv_;
+    std::condition_variable persist_cv_;               // wait for persist_lsn_ to advance
     std::mutex io_latch_;                              // 保护磁盘 I/O，防止 Leader 与溢出刷盘竞态
     char flush_buffer_[LOG_BUFFER_SIZE + 1];
     int flush_offset_{0};

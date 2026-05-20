@@ -28,6 +28,7 @@ lsn_t LogManager::add_log_to_buffer(LogRecord* log_record) {
         }
         persist_lsn_ = lsn - 1;
         log_buffer_.offset_ = 0;
+        persist_cv_.notify_all();
     }
     log_record->serialize(log_buffer_.buffer_ + log_buffer_.offset_);
     log_buffer_.offset_ += log_len;
@@ -59,6 +60,7 @@ void LogManager::flush_log_to_disk() {
     memcpy(flush_buffer_, log_buffer_.buffer_, log_buffer_.offset_);
     flush_offset_ = log_buffer_.offset_;
     log_buffer_.offset_ = 0;
+    lsn_t flushed_up_to = global_lsn_ - 1;  // 捕获本次刷盘的 LSN 上界
     lock.unlock();
 
     // 核心 I/O：持有 io_latch_ 防止与 add_log_to_buffer 溢出刷盘竞态
@@ -69,9 +71,10 @@ void LogManager::flush_log_to_disk() {
 
     // 重新获取锁，更新持久化位点，唤醒 Followers
     lock.lock();
-    persist_lsn_ = global_lsn_ - 1;
+    persist_lsn_ = flushed_up_to;  // 使用捕获的精确值，避免并发追加导致 inflate
     is_flushing_ = false;
     group_commit_cv_.notify_all();
+    persist_cv_.notify_all();
 }
 
 void LogManager::flush_thread_loop() {
@@ -91,6 +94,13 @@ void LogManager::start_flush_thread() {
     if (flush_thread_.joinable()) return;
     stop_flush_ = false;
     flush_thread_ = std::thread(&LogManager::flush_thread_loop, this);
+}
+
+void LogManager::wait_for_persist_lsn(lsn_t target) {
+    std::unique_lock<std::mutex> lock(latch_);
+    persist_cv_.wait(lock, [this, target] {
+        return persist_lsn_ >= target;
+    });
 }
 
 void LogManager::stop_flush_thread() {
