@@ -89,7 +89,14 @@ class SortExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
-        return std::make_unique<RmRecord>(*tuples_[current_idx_]);
+        // Return a non-owning view into the sorted tuples_ vector.
+        // Safe because tuples_ persists for the lifetime of this SortExecutor.
+        auto& src = *tuples_[current_idx_];
+        auto rec = std::make_unique<RmRecord>();
+        rec->size = src.size;
+        rec->data = src.data;
+        rec->allocated_ = false;
+        return rec;
     }
 
     Rid &rid() override { return _abstract_rid; }

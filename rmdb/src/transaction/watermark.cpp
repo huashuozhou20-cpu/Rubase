@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 
 
 auto Watermark::AddTxn(timestamp_t read_ts) -> void {
+    std::scoped_lock lock(mtx_);
     if (current_reads_.find(read_ts) == current_reads_.end()) {
         current_reads_[read_ts] = 1;
         if (read_ts < watermark_) {
@@ -23,6 +24,7 @@ auto Watermark::AddTxn(timestamp_t read_ts) -> void {
 }
 
 auto Watermark::RemoveTxn(timestamp_t read_ts) -> void {
+    std::scoped_lock lock(mtx_);
     auto it = current_reads_.find(read_ts);
     if (it != current_reads_.end()) {
         it->second--;
@@ -38,6 +40,7 @@ auto Watermark::RemoveTxn(timestamp_t read_ts) -> void {
 }
 
 auto Watermark::UpdateCommitTs(timestamp_t commit_ts) -> void {
+    std::scoped_lock lock(mtx_);
     commit_ts_ = commit_ts;
     if (current_reads_.empty() && commit_ts_ > watermark_) {
         watermark_ = commit_ts_;
@@ -45,5 +48,6 @@ auto Watermark::UpdateCommitTs(timestamp_t commit_ts) -> void {
 }
 
 auto Watermark::GetWatermark() -> timestamp_t {
+    std::scoped_lock lock(mtx_);
     return watermark_;
 }

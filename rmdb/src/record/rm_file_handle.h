@@ -75,6 +75,11 @@ class RmFileHandle {
 
     std::unique_ptr<RmRecord> get_record(const Rid &rid, Context *context) const;
 
+    // Lock-free snapshot read for MVCC — reads slot data without acquiring 2PL locks.
+    std::unique_ptr<RmRecord> get_record_snapshot(const Rid &rid) const;
+
+    txn_id_t get_record_trx_id(const Rid &rid) const;
+
     Rid insert_record(char *buf, Context *context);
 
     void insert_record(const Rid &rid, char *buf);

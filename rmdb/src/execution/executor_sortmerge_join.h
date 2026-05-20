@@ -531,8 +531,6 @@ class SortMergeJoinExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
-        // Fill reusable buffer, then return a copy.
-        // (The one allocation here is unavoidable due to the unique_ptr interface.)
         if (left_exhausted_) {
             memset(output_record_.data, 0, left_->tupleLen());
             memcpy(output_record_.data + left_->tupleLen(),
@@ -545,7 +543,13 @@ class SortMergeJoinExecutor : public AbstractExecutor {
             memcpy(output_record_.data + left_->tupleLen(),
                    right_record_.data, right_->tupleLen());
         }
-        return std::make_unique<RmRecord>(static_cast<int>(len_), output_record_.data);
+        // Return a non-owning view into the pre-allocated output_record_ buffer.
+        // Safe because callers process and discard results before the next Next() call.
+        auto rec = std::make_unique<RmRecord>();
+        rec->size = static_cast<int>(len_);
+        rec->data = output_record_.data;
+        rec->allocated_ = false;
+        return rec;
     }
 
     Rid &rid() override { return _abstract_rid; }

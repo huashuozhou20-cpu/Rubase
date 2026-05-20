@@ -31,6 +31,22 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         txn->set_read_ts(next_timestamp_++);
         txn->set_start_ts(txn->get_read_ts());
         running_txns_.AddTxn(txn->get_read_ts());
+
+        // Build ReadView under latch_ (txn_map iteration must be protected)
+        ReadView rv;
+        rv.low_limit_id_ = next_txn_id_.load();
+        rv.up_limit_id_ = rv.low_limit_id_;
+        {
+            std::scoped_lock lock(latch_);
+            for (auto& [tid, t] : TransactionManager::txn_map) {
+                auto state = t->get_state();
+                if (state == TransactionState::GROWING || state == TransactionState::SHRINKING) {
+                    rv.active_txn_ids_.push_back(tid);
+                    if (tid < rv.up_limit_id_) rv.up_limit_id_ = tid;
+                }
+            }
+        }
+        txn->set_read_view(rv);
     }
 
     std::scoped_lock lock(latch_);
@@ -67,14 +83,14 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         running_txns_.RemoveTxn(txn->get_read_ts());
-    }
-
-    std::scoped_lock lock(latch_);
-    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
-        // In MVCC mode, keep the transaction in the map for version chain traversal.
-        // GarbageCollection will clean it up later when below the watermark.
         running_txns_.UpdateCommitTs(txn->get_commit_ts());
+        // Periodic GC: clean up committed/aborted txns below the watermark
+        static std::atomic<int> gc_counter{0};
+        if (++gc_counter % 64 == 0) {
+            GarbageCollection();
+        }
     } else {
+        std::scoped_lock lock(latch_);
         TransactionManager::txn_map.erase(txn->get_transaction_id());
     }
 }
@@ -122,12 +138,9 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
 
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         running_txns_.RemoveTxn(txn->get_read_ts());
-    }
-
-    std::scoped_lock lock(latch_);
-    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         running_txns_.UpdateCommitTs(txn->get_commit_ts());
     } else {
+        std::scoped_lock lock(latch_);
         TransactionManager::txn_map.erase(txn->get_transaction_id());
     }
 }

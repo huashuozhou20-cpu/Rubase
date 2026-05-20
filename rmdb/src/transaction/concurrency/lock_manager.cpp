@@ -88,6 +88,10 @@ bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, 
                     update_group_lock_mode(queue);
                     return true;
                 }
+                // Other S holders exist — blocking would create a deadlock cycle
+                // since they may also be trying to upgrade S→X. Abort immediately.
+                throw TransactionAbortException(txn->get_transaction_id(),
+                                                AbortReason::UPGRADE_CONFLICT);
             }
             // Already holds a lock that covers the requested lock mode
             // X covers everything; SIX covers S and IX; IX covers IS
@@ -145,6 +149,7 @@ bool LockManager::lock_shared_on_record(Transaction* txn, const Rid& rid, int ta
  * @description: 申请行级排他锁
  */
 bool LockManager::lock_exclusive_on_record(Transaction* txn, const Rid& rid, int tab_fd) {
+    txn->set_read_only(false);  // Mark as read-write txn for MVCC
     LockDataId lock_data_id(tab_fd, rid, LockDataType::RECORD);
     return lock_common(txn, lock_data_id, LockMode::EXLUCSIVE);
 }
@@ -177,6 +182,7 @@ bool LockManager::lock_IS_on_table(Transaction* txn, int tab_fd) {
  * @description: 申请表级意向写锁
  */
 bool LockManager::lock_IX_on_table(Transaction* txn, int tab_fd) {
+    txn->set_read_only(false);  // Mark as read-write txn for MVCC
     LockDataId lock_data_id(tab_fd, LockDataType::TABLE);
     return lock_common(txn, lock_data_id, LockMode::INTENTION_EXCLUSIVE);
 }

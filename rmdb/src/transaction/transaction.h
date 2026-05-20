@@ -54,6 +54,13 @@ struct UndoLog {
 };
 
 
+/** MVCC ReadView: a snapshot of active transactions at read time. */
+struct ReadView {
+    txn_id_t up_limit_id_{INVALID_TXN_ID};   // min active txn id — txns below this have committed
+    txn_id_t low_limit_id_{INVALID_TXN_ID};  // next txn id — txns >= this are future
+    std::vector<txn_id_t> active_txn_ids_;   // currently active (uncommitted) txn ids
+};
+
 class Transaction {
    public:
     explicit Transaction(txn_id_t txn_id, IsolationLevel isolation_level = IsolationLevel::SERIALIZABLE)
@@ -97,6 +104,28 @@ class Transaction {
 
     inline std::shared_ptr<std::unordered_set<LockDataId>> get_lock_set() { return lock_set_; }
 
+    // MVCC ReadView
+    inline ReadView& get_read_view() { return read_view_; }
+    inline void set_read_view(const ReadView& rv) { read_view_ = rv; }
+    inline bool has_read_view() const { return read_view_.low_limit_id_ != INVALID_TXN_ID; }
+
+    inline bool is_read_only() const { return is_read_only_; }
+    inline void set_read_only(bool ro) { is_read_only_ = ro; }
+
+    // MVCC visibility check: returns true if a record last modified by trx_id
+    // should be visible to this transaction under its ReadView snapshot.
+    inline bool is_visible(txn_id_t trx_id) const {
+        if (trx_id == txn_id_) return true;           // own modifications
+        if (!has_read_view()) return true;             // no snapshot → all visible
+        if (trx_id == INVALID_TXN_ID) return true;     // inserted without txn context
+        if (trx_id < read_view_.up_limit_id_) return true;  // committed before snapshot
+        if (trx_id >= read_view_.low_limit_id_) return false; // future txn
+        for (auto id : read_view_.active_txn_ids_) {
+            if (id == trx_id) return false;            // active at snapshot time
+        }
+        return true;  // committed (not in active set)
+    }
+
     inline timestamp_t get_read_ts() const { return read_ts_; }
     inline void set_read_ts(timestamp_t ts) { read_ts_ = ts; }
     inline timestamp_t get_commit_ts() const { return commit_ts_; }
@@ -134,6 +163,8 @@ class Transaction {
     lsn_t prev_lsn_;                  // 当前事务执行的最后一条操作对应的lsn，用于系统故障恢复
     txn_id_t txn_id_;                 // 事务的ID，唯一标识符
     timestamp_t start_ts_;            // 事务的开始时间戳
+    ReadView read_view_;              // MVCC read view snapshot
+    bool is_read_only_{true};         // true until first write lock is acquired
 
     std::shared_ptr<std::deque<WriteRecord *>> write_set_;  // 事务包含的所有写操作
     std::shared_ptr<std::unordered_set<LockDataId>> lock_set_;  // 事务申请的所有锁

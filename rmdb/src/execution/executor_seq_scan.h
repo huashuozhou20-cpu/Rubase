@@ -217,23 +217,84 @@ class SeqScanExecutor : public AbstractExecutor {
         is_end_ = true;
     }
 
+    // Returns a visible version of the record at the given rid, following the
+    // MVCC version chain through undo logs if the current version is not visible.
+    std::unique_ptr<RmRecord> get_visible_record(const Rid& rid) {
+        auto rec = fh_->get_record_snapshot(rid);
+        if (!rec) return nullptr;
+
+        txn_id_t trx_id;
+        memcpy(&trx_id, rec->data + trx_id_offset(rec->size), sizeof(txn_id_t));
+
+        if (context_->txn_->is_visible(trx_id)) {
+            return rec;
+        }
+
+        // Follow version chain through undo logs
+        UndoLink roll_ptr;
+        memcpy(&roll_ptr, rec->data + roll_ptr_offset(rec->size), sizeof(UndoLink));
+
+        while (roll_ptr.IsValid()) {
+            auto undo_opt = context_->txn_mgr_->GetUndoLogOptional(roll_ptr);
+            if (!undo_opt.has_value()) return nullptr;
+
+            auto& undo = *undo_opt;
+            if (undo.is_deleted_) return nullptr;
+            if (!undo.tuple_test_) return nullptr;
+
+            // Read trx_id from the old version's hidden fields
+            int old_size = undo.tuple_test_->size;
+            txn_id_t old_trx_id;
+            memcpy(&old_trx_id,
+                   undo.tuple_test_->data + trx_id_offset(old_size),
+                   sizeof(txn_id_t));
+
+            if (context_->txn_->is_visible(old_trx_id)) {
+                // Return a (shallow, non-owning) copy of the old record data.
+                auto result = std::make_unique<RmRecord>();
+                result->size = old_size;
+                result->data = undo.tuple_test_->data;
+                result->allocated_ = false;
+                return result;
+            }
+
+            roll_ptr = undo.prev_version_;
+        }
+
+        return nullptr;  // no visible version in chain
+    }
+
+    // Check whether we should use MVCC lock-free snapshot reads.
+    bool use_mvcc_read() const {
+        return context_->txn_mgr_ != nullptr
+            && context_->txn_ != nullptr
+            && context_->txn_->has_read_view()
+            && context_->txn_->is_read_only();
+    }
+
     void beginTuple() override {
         scan_ = std::make_unique<RmScan>(fh_);
-        // RmScan constructor already calls next() to position at first record.
-        // Check if the first record passes conditions; if not, advance.
         if (scan_->is_end()) {
             is_end_ = true;
             return;
         }
         is_end_ = false;
         rid_ = scan_->rid();
-        auto rec = fh_->get_record(rid_, context_);
-        if (!check_all_conds(*rec)) {
-            nextTuple();
+        if (use_mvcc_read()) {
+            auto rec = get_visible_record(rid_);
+            if (!rec || !check_all_conds(*rec)) {
+                nextTuple();
+            }
+        } else {
+            auto rec = fh_->get_record(rid_, context_);
+            if (!check_all_conds(*rec)) {
+                nextTuple();
+            }
         }
     }
 
     void nextTuple() override {
+        bool mvcc = use_mvcc_read();
         while (true) {
             scan_->next();
             if (scan_->is_end()) {
@@ -241,9 +302,13 @@ class SeqScanExecutor : public AbstractExecutor {
                 return;
             }
             rid_ = scan_->rid();
-            // 读取记录并检查条件
-            auto rec = fh_->get_record(rid_, context_);
-            if (check_all_conds(*rec)) return;
+            if (mvcc) {
+                auto rec = get_visible_record(rid_);
+                if (rec && check_all_conds(*rec)) return;
+            } else {
+                auto rec = fh_->get_record(rid_, context_);
+                if (check_all_conds(*rec)) return;
+            }
         }
     }
 
@@ -264,6 +329,9 @@ class SeqScanExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
+        if (use_mvcc_read()) {
+            return get_visible_record(rid_);
+        }
         return fh_->get_record(rid_, context_);
     }
 

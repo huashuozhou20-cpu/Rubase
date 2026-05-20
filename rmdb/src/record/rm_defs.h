@@ -18,6 +18,22 @@ constexpr int RM_FILE_HDR_PAGE = 0;
 constexpr int RM_FIRST_RECORD_PAGE = 1;
 constexpr int RM_MAX_RECORD_SIZE = 512;
 
+// MVCC hidden fields appended after user columns in each record slot.
+// Layout: [user columns][trx_id (8B)][roll_ptr_ UndoLink (16B)]
+constexpr int RM_HIDDEN_TRX_ID_SIZE = 8;     // sizeof(txn_id_t) = sizeof(int64_t)
+constexpr int RM_HIDDEN_ROLL_PTR_SIZE = 16;  // packed sizeof(UndoLink) for on-disk storage
+constexpr int RM_HIDDEN_TOTAL_SIZE = 24;     // 8 + 16
+
+inline int trx_id_offset(int record_size) {
+    return record_size - RM_HIDDEN_TOTAL_SIZE;
+}
+inline int roll_ptr_offset(int record_size) {
+    return record_size - RM_HIDDEN_ROLL_PTR_SIZE;
+}
+inline int user_data_size(int record_size) {
+    return record_size - RM_HIDDEN_TOTAL_SIZE;
+}
+
 struct TupleMeta {
     timestamp_t ts_;
     bool is_deleted_;

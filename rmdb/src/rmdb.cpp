@@ -38,7 +38,8 @@ auto rm_manager = std::make_unique<RmManager>(disk_manager.get(), buffer_pool_ma
 auto ix_manager = std::make_unique<IxManager>(disk_manager.get(), buffer_pool_manager.get());
 auto sm_manager = std::make_unique<SmManager>(disk_manager.get(), buffer_pool_manager.get(), rm_manager.get(), ix_manager.get());
 auto lock_manager = std::make_unique<LockManager>();
-auto txn_manager = std::make_unique<TransactionManager>(lock_manager.get(), sm_manager.get());
+auto txn_manager = std::make_unique<TransactionManager>(lock_manager.get(), sm_manager.get(),
+                                                         ConcurrencyMode::MVCC);
 auto planner = std::make_unique<Planner>(sm_manager.get());
 auto optimizer = std::make_unique<Optimizer>(sm_manager.get(), planner.get());
 auto ql_manager = std::make_unique<QlManager>(sm_manager.get(), txn_manager.get(), nullptr);
@@ -98,6 +99,7 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
                 int sub_offset = 0;
                 auto sub_txn = txn_manager->begin(nullptr, log_manager.get());
                 Context sub_ctx(lock_manager.get(), log_manager.get(), sub_txn, sub_buf, &sub_offset);
+                sub_ctx.txn_mgr_ = txn_manager.get();
                 auto sub_plan = planner->do_planner(sub_query, &sub_ctx);
                 // Unwrap DMLPlan wrapper
                 if (auto dml = std::dynamic_pointer_cast<DMLPlan>(sub_plan))
@@ -139,6 +141,7 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
                 char sub_buf[BUFFER_LENGTH]; int sub_offset = 0;
                 auto sub_txn = txn_manager->begin(nullptr, log_manager.get());
                 Context sub_ctx(lock_manager.get(), log_manager.get(), sub_txn, sub_buf, &sub_offset);
+                sub_ctx.txn_mgr_ = txn_manager.get();
                 auto sub_plan = planner->do_planner(sub_query, &sub_ctx);
                 if (auto dml = std::dynamic_pointer_cast<DMLPlan>(sub_plan))
                     sub_plan = dml->subplan_;
@@ -273,6 +276,7 @@ void *client_handler(void *sock_fd) {
 
             // 开启事务，初始化系统所需的上下文信息
             Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset);
+            context->txn_mgr_ = txn_manager.get();
             SetTransaction(&txn_id, context);
 
             // 用于判断是否已经调用了yy_delete_buffer来删除buf

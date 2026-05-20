@@ -33,6 +33,34 @@ std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* cont
 }
 
 /**
+ * @description: Lock-free snapshot read — reads the current version from the slot
+ * without acquiring 2PL locks. Used by MVCC snapshot scans.
+ */
+std::unique_ptr<RmRecord> RmFileHandle::get_record_snapshot(const Rid& rid) const {
+    RmPageHandle page_handle = fetch_page_handle(rid.page_no);
+    if (!Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
+        buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+        return nullptr;
+    }
+    char* slot = page_handle.get_slot(rid.slot_no);
+    auto rec = std::make_unique<RmRecord>(file_hdr_.record_size, slot);
+    buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+    return rec;
+}
+
+/**
+ * @description: 读取记录中隐藏的 trx_id 字段（最后修改此记录的事务ID）
+ */
+txn_id_t RmFileHandle::get_record_trx_id(const Rid& rid) const {
+    RmPageHandle page_handle = fetch_page_handle(rid.page_no);
+    char* slot = page_handle.get_slot(rid.slot_no);
+    txn_id_t trx_id;
+    memcpy(&trx_id, slot + trx_id_offset(file_hdr_.record_size), RM_HIDDEN_TRX_ID_SIZE);
+    buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+    return trx_id;
+}
+
+/**
  * @description: 在当前表中插入一条记录，不指定插入位置
  * @param {char*} buf 要插入的记录的数据
  * @param {Context*} context
@@ -45,7 +73,14 @@ Rid RmFileHandle::insert_record(char* buf, Context* context) {
     RmPageHandle page_handle = create_page_handle();
     int slot_no = Bitmap::first_bit(false, page_handle.bitmap, file_hdr_.num_records_per_page);
     char* slot = page_handle.get_slot(slot_no);
-    memcpy(slot, buf, file_hdr_.record_size);
+    // Copy user-visible data (excludes hidden field area)
+    memcpy(slot, buf, user_data_size(file_hdr_.record_size));
+    // Fill MVCC hidden fields
+    txn_id_t trx_id = (context != nullptr) ? context->txn_->get_transaction_id()
+                                           : INVALID_TXN_ID;
+    memcpy(slot + trx_id_offset(file_hdr_.record_size), &trx_id, RM_HIDDEN_TRX_ID_SIZE);
+    // roll_pointer = invalid UndoLink (zeros = INVALID_TXN_ID + index 0)
+    memset(slot + roll_ptr_offset(file_hdr_.record_size), 0, RM_HIDDEN_ROLL_PTR_SIZE);
     Bitmap::set(page_handle.bitmap, slot_no);
     page_handle.page_hdr->num_records++;
     int page_no = page_handle.page->get_page_id().page_no;
@@ -97,6 +132,25 @@ void RmFileHandle::delete_record(const Rid& rid, Context* context) {
         buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
         throw RecordNotFoundError(rid.page_no, rid.slot_no);
     }
+
+    if (context != nullptr) {
+        char* slot = page_handle.get_slot(rid.slot_no);
+        // Snapshot the old version before deletion
+        UndoLog undo_log;
+        undo_log.is_deleted_ = true;
+        undo_log.tuple_test_ = new RmRecord(file_hdr_.record_size, slot);
+        undo_log.ts_ = context->txn_->get_start_ts();
+        memcpy(&undo_log.prev_version_, slot + roll_ptr_offset(file_hdr_.record_size),
+               sizeof(UndoLink));
+
+        UndoLink new_link = context->txn_->AppendUndoLog(std::move(undo_log));
+
+        // Update hidden fields to point to the undo log
+        txn_id_t my_txn = context->txn_->get_transaction_id();
+        memcpy(slot + trx_id_offset(file_hdr_.record_size), &my_txn, RM_HIDDEN_TRX_ID_SIZE);
+        memcpy(slot + roll_ptr_offset(file_hdr_.record_size), &new_link, sizeof(UndoLink));
+    }
+
     Bitmap::reset(page_handle.bitmap, rid.slot_no);
     page_handle.page_hdr->num_records--;
     if (page_handle.page_hdr->num_records == file_hdr_.num_records_per_page - 1) {
@@ -124,7 +178,30 @@ void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
         throw RecordNotFoundError(rid.page_no, rid.slot_no);
     }
     char* slot = page_handle.get_slot(rid.slot_no);
-    memcpy(slot, buf, file_hdr_.record_size);
+
+    if (context != nullptr) {
+        // Snapshot the old version (user data + hidden fields) before overwriting
+        UndoLog undo_log;
+        undo_log.is_deleted_ = false;
+        undo_log.tuple_test_ = new RmRecord(file_hdr_.record_size, slot);
+        undo_log.ts_ = context->txn_->get_start_ts();
+        // Chain old roll_pointer into this undo log's prev_version
+        memcpy(&undo_log.prev_version_, slot + roll_ptr_offset(file_hdr_.record_size),
+               sizeof(UndoLink));
+
+        UndoLink new_link = context->txn_->AppendUndoLog(std::move(undo_log));
+
+        // Write new user data
+        memcpy(slot, buf, user_data_size(file_hdr_.record_size));
+        // Write new hidden fields: trx_id = current txn, roll_ptr → undo log
+        txn_id_t my_txn = context->txn_->get_transaction_id();
+        memcpy(slot + trx_id_offset(file_hdr_.record_size), &my_txn, RM_HIDDEN_TRX_ID_SIZE);
+        memcpy(slot + roll_ptr_offset(file_hdr_.record_size), &new_link, sizeof(UndoLink));
+    } else {
+        // Recovery / rollback path: buf already contains complete record
+        memcpy(slot, buf, file_hdr_.record_size);
+    }
+
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
 }
 

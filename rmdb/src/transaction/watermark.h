@@ -33,6 +33,7 @@ public:
 
   timestamp_t GetWatermark();
 
+  mutable std::mutex mtx_;
   mutable timestamp_t commit_ts_;
 
   timestamp_t watermark_;

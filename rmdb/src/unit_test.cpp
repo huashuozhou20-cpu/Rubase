@@ -111,12 +111,13 @@ struct rid_equal_t {
 
 void check_equal(const RmFileHandle *file_handle,
                  const std::unordered_map<Rid, std::string, rid_hash_t, rid_equal_t> &mock) {
+    int cmp_size = user_data_size(file_handle->file_hdr_.record_size);
     // Test all records
     for (auto &entry : mock) {
         Rid rid = entry.first;
         auto mock_buf = (char *)entry.second.c_str();
         auto rec = file_handle->get_record(rid, nullptr);
-        assert(memcmp(mock_buf, rec->data, file_handle->file_hdr_.record_size) == 0);
+        assert(memcmp(mock_buf, rec->data, cmp_size) == 0);
     }
     // Randomly get record
     for (int i = 0; i < 10; i++) {
@@ -131,7 +132,7 @@ void check_equal(const RmFileHandle *file_handle,
     for (RmScan scan(file_handle); !scan.is_end(); scan.next()) {
         assert(mock.count(scan.rid()) > 0);
         auto rec = file_handle->get_record(scan.rid(), nullptr);
-        assert(memcmp(rec->data, mock.at(scan.rid()).c_str(), file_handle->file_hdr_.record_size) == 0);
+        assert(memcmp(rec->data, mock.at(scan.rid()).c_str(), cmp_size) == 0);
         num_records++;
     }
     assert(num_records == mock.size());
@@ -580,6 +581,7 @@ TEST(RecordManagerTest, SimpleTest) {
     std::string filename = "abc.txt";
 
     int record_size = 4 + rand() % 256;  // 元组大小随便设置，只要不超过RM_MAX_RECORD_SIZE
+    int full_record_size = record_size + RM_HIDDEN_TOTAL_SIZE;  // includes MVCC hidden fields
     // test files
     {
         // 删除残留的同名文件
@@ -587,11 +589,11 @@ TEST(RecordManagerTest, SimpleTest) {
             disk_manager->destroy_file(filename);
         }
         // 将file header写入到磁盘中的filename文件
-        rm_manager->create_file(filename, record_size);
+        rm_manager->create_file(filename, full_record_size);
         // 将磁盘中的filename文件读出到内存中的file handle的file header
         std::unique_ptr<RmFileHandle> file_handle = rm_manager->open_file(filename);
         // 检查filename文件在内存中的file header的参数
-        assert(file_handle->file_hdr_.record_size == record_size);
+        assert(file_handle->file_hdr_.record_size == full_record_size);
         assert(file_handle->file_hdr_.first_free_page_no == RM_NO_PAGE);
         assert(file_handle->file_hdr_.num_pages == 1);
 
@@ -609,7 +611,7 @@ TEST(RecordManagerTest, SimpleTest) {
         rm_manager->destroy_file(filename);
     }
     // test pages
-    rm_manager->create_file(filename, record_size);
+    rm_manager->create_file(filename, full_record_size);
     auto file_handle = rm_manager->open_file(filename);
 
     char write_buf[PAGE_SIZE];
@@ -620,9 +622,9 @@ TEST(RecordManagerTest, SimpleTest) {
         double insert_prob = 1. - mock.size() / 250.;
         double dice = rand() * 1. / RAND_MAX;
         if (mock.empty() || dice < insert_prob) {
-            rand_buf(file_handle->file_hdr_.record_size, write_buf);
+            rand_buf(record_size, write_buf);  // fill user data portion only
             Rid rid = file_handle->insert_record(write_buf, nullptr);
-            mock[rid] = std::string((char *)write_buf, file_handle->file_hdr_.record_size);
+            mock[rid] = std::string((char *)write_buf, record_size);
             add_cnt++;
             //            std::cout << "insert " << rid << '\n'; // operator<<(cout,rid)
         } else {
@@ -635,9 +637,9 @@ TEST(RecordManagerTest, SimpleTest) {
             auto rid = it->first;
             if (rand() % 2 == 0) {
                 // update
-                rand_buf(file_handle->file_hdr_.record_size, write_buf);
+                rand_buf(record_size, write_buf);
                 file_handle->update_record(rid, write_buf, nullptr);
-                mock[rid] = std::string((char *)write_buf, file_handle->file_hdr_.record_size);
+                mock[rid] = std::string((char *)write_buf, record_size);
                 upd_cnt++;
                 //                std::cout << "update " << rid << '\n';
             } else {
