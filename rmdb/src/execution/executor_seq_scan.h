@@ -29,6 +29,10 @@ class SeqScanExecutor : public AbstractExecutor {
     std::unique_ptr<RecScan> scan_;     // table_iterator
     bool is_end_;
 
+    // Gap lock state for phantom prevention during FOR UPDATE range scans
+    bool has_match_;       // at least one matching record has been returned
+    bool guard_locked_;    // GAP lock acquired on the first non-matching record after match
+
     SmManager *sm_manager_;
 
     // 评估单条条件是否满足（支持递归 OR/NOT）
@@ -215,6 +219,8 @@ class SeqScanExecutor : public AbstractExecutor {
         context_ = context;
         fed_conds_ = conds_;
         is_end_ = true;
+        has_match_ = false;
+        guard_locked_ = false;
     }
 
     // Returns a visible version of the record at the given rid, following the
@@ -280,6 +286,8 @@ class SeqScanExecutor : public AbstractExecutor {
     bool use_for_update() const { return context_->is_for_update_; }
 
     void beginTuple() override {
+        has_match_ = false;
+        guard_locked_ = false;
         scan_ = std::make_unique<RmScan>(fh_);
         if (scan_->is_end()) {
             is_end_ = true;
@@ -289,7 +297,11 @@ class SeqScanExecutor : public AbstractExecutor {
         rid_ = scan_->rid();
         if (use_for_update()) {
             auto rec = fh_->get_record_for_update(rid_, context_);
-            if (!check_all_conds(*rec)) {
+            if (check_all_conds(*rec)) {
+                // Matching record: acquire NEXT_KEY lock (X on record + GAP before it)
+                context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                has_match_ = true;
+            } else {
                 nextTuple();
             }
         } else if (use_mvcc_read()) {
@@ -313,6 +325,13 @@ class SeqScanExecutor : public AbstractExecutor {
     void nextTuple() override {
         bool for_update = use_for_update();
         bool mvcc = !for_update && use_mvcc_read();
+
+        // If guard was already locked, stop scan
+        if (guard_locked_) {
+            is_end_ = true;
+            return;
+        }
+
         while (true) {
             scan_->next();
             if (scan_->is_end()) {
@@ -322,7 +341,20 @@ class SeqScanExecutor : public AbstractExecutor {
             rid_ = scan_->rid();
             if (for_update) {
                 auto rec = fh_->get_record_for_update(rid_, context_);
-                if (check_all_conds(*rec)) return;
+                if (check_all_conds(*rec)) {
+                    // Matching record: acquire NEXT_KEY (X on record via get_record_for_update + GAP)
+                    context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                    has_match_ = true;
+                    return;
+                } else if (has_match_) {
+                    // First non-matching record after a match: GAP lock on guard key
+                    // Prevents phantom inserts at the tail of our scan range.
+                    context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                    guard_locked_ = true;
+                    is_end_ = true;
+                    return;
+                }
+                // Non-match before any match: continue scanning
             } else if (mvcc) {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;

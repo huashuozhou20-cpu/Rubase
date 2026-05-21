@@ -66,7 +66,7 @@ class WriteRecord {
 };
 
 /* 多粒度锁，加锁对象的类型，包括记录和表 */
-enum class LockDataType { TABLE = 0, RECORD = 1 };
+enum class LockDataType { TABLE = 0, RECORD = 1, GAP = 2 };
 
 /**
  * @description: 加锁对象的唯一标识
@@ -82,9 +82,9 @@ class LockDataId {
         rid_.slot_no = -1;
     }
 
-    /* 行级锁 */
+    /* 行级锁 / 间隙锁 */
     LockDataId(int fd, const Rid &rid, LockDataType type) {
-        assert(type == LockDataType::RECORD);
+        assert(type == LockDataType::RECORD || type == LockDataType::GAP);
         fd_ = fd;
         rid_ = rid;
         type_ = type;
@@ -92,10 +92,9 @@ class LockDataId {
 
     inline int64_t Get() const {
         if (type_ == LockDataType::TABLE) {
-            // fd_
             return static_cast<int64_t>(fd_);
         } else {
-            // fd_, rid_.page_no, rid.slot_no
+            // fd_, rid_.page_no, rid.slot_no (type distinguishes RECORD from GAP)
             return ((static_cast<int64_t>(type_)) << 63) | ((static_cast<int64_t>(fd_)) << 31) |
                    ((static_cast<int64_t>(rid_.page_no)) << 16) | rid_.slot_no;
         }

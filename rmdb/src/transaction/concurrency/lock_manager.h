@@ -18,14 +18,15 @@ See the Mulan PSL v2 for more details. */
 #include <unordered_set>
 #include "transaction/transaction.h"
 
-static const std::string GroupLockModeStr[10] = {"NON_LOCK", "IS", "IX", "S", "X", "SIX"};
+static const std::string GroupLockModeStr[10] = {"NON_LOCK", "IS", "IX", "S", "X", "SIX", "GAP", "NEXT_KEY", "INSERT_INT"};
 
 class LockManager {
-    /* 加锁类型，包括共享锁、排他锁、意向共享锁、意向排他锁、SIX（意向排他锁+共享锁） */
-    enum class LockMode { SHARED, EXLUCSIVE, INTENTION_SHARED, INTENTION_EXCLUSIVE, S_IX };
+    /* 加锁类型，包括共享锁、排他锁、意向共享锁、意向排他锁、SIX（意向排他锁+共享锁）、间隙锁、临键锁、插入意向锁 */
+    enum class LockMode { SHARED, EXLUCSIVE, INTENTION_SHARED, INTENTION_EXCLUSIVE, S_IX,
+                          GAP, NEXT_KEY, INSERT_INTENTION };
 
-    /* 用于标识加锁队列中排他性最强的锁类型，例如加锁队列中有SHARED和EXLUSIVE两个加锁操作，则该队列的锁模式为X */
-    enum class GroupLockMode { NON_LOCK, IS, IX, S, X, SIX};
+    /* 用于标识加锁队列中排他性最强的锁类型 */
+    enum class GroupLockMode { NON_LOCK, IS, IX, S, X, SIX, GAP, NEXT_KEY, INSERT_INT };
 
     /* 事务的加锁申请 */
     class LockRequest {
@@ -62,6 +63,11 @@ public:
     bool lock_IS_on_table(Transaction* txn, int tab_fd);
 
     bool lock_IX_on_table(Transaction* txn, int tab_fd);
+
+    // Gap lock / Next-Key lock / Insert Intention (phantom prevention)
+    bool lock_gap(Transaction* txn, const Rid& rid, int tab_fd);
+    bool lock_next_key(Transaction* txn, const Rid& rid, int tab_fd);
+    bool lock_insert_intention(Transaction* txn, const Rid& rid, int tab_fd);
 
     bool unlock(Transaction* txn, LockDataId lock_data_id);
 

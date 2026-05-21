@@ -22,21 +22,34 @@ LockManager::GroupLockMode LockManager::lock_mode_to_group_mode(LockMode mode) {
         case LockMode::INTENTION_SHARED:    return GroupLockMode::IS;
         case LockMode::INTENTION_EXCLUSIVE: return GroupLockMode::IX;
         case LockMode::S_IX:                return GroupLockMode::SIX;
+        case LockMode::GAP:                 return GroupLockMode::GAP;
+        case LockMode::NEXT_KEY:            return GroupLockMode::NEXT_KEY;
+        case LockMode::INSERT_INTENTION:    return GroupLockMode::INSERT_INT;
         default:                            return GroupLockMode::NON_LOCK;
     }
 }
 
 bool LockManager::is_compatible(LockMode request_mode, GroupLockMode group_mode) {
     // Compatibility matrix: can request_mode be granted when group_mode is held?
-    // LockMode order:          SHARED=0, EXLUCSIVE=1, INTENTION_SHARED=2, INTENTION_EXCLUSIVE=3, S_IX=4
-    // GroupLockMode order:     NON_LOCK=0, IS=1, IX=2, S=3, X=4, SIX=5
-    static const bool compat[5][6] = {
-        //         NL  IS  IX   S   X  SIX
-        /* SHARED (S)          */ { 1,  1,  0,  1,  0,  0 },
-        /* EXCLUSIVE (X)       */ { 1,  0,  0,  0,  0,  0 },
-        /* INTENTION_SHARED (IS)*/{ 1,  1,  1,  1,  0,  1 },
-        /* INTENTION_EXCL (IX) */ { 1,  1,  1,  0,  0,  0 },
-        /* S_IX                */ { 1,  1,  0,  0,  0,  0 },
+    // LockMode order:       SHARED=0, EXCLUSIVE=1, IS=2, IX=3, S_IX=4, GAP=5, NEXT_KEY=6, INSERT_INT=7
+    // GroupLockMode order:  NL=0, IS=1, IX=2, S=3, X=4, SIX=5, GAP=6, NEXT_KEY=7, INSERT_INT=8
+    //
+    // Rules:
+    //  - GAP locks are compatible with each other (multiple txns can guard the same gap)
+    //  - GAP conflicts only with INSERT_INTENTION and NEXT_KEY (and X of course)
+    //  - INSERT_INTENTION is compatible with other INSERT_INTENTION (multiple waiters queue)
+    //  - NEXT_KEY = X + GAP, conflicts like X on record + like GAP on gap
+    //  - INSERT_INTENTION conflicts with GAP and NEXT_KEY (cannot insert into a guarded gap)
+    static const bool compat[8][9] = {
+        //         NL  IS  IX   S   X  SIX GAP NKY IIN
+        /* S     */{ 1,  1,  0,  1,  0,  0,  0,  0,  0 },
+        /* X     */{ 1,  0,  0,  0,  0,  0,  0,  0,  0 },
+        /* IS    */{ 1,  1,  1,  1,  0,  1,  1,  0,  1 },
+        /* IX    */{ 1,  1,  1,  0,  0,  0,  1,  0,  1 },
+        /* S_IX  */{ 1,  1,  0,  0,  0,  0,  0,  0,  0 },
+        /* GAP   */{ 1,  1,  1,  1,  0,  0,  1,  0,  0 },
+        /* NEXT_KEY */{ 1, 0,  0,  0,  0,  0,  0,  0,  0 },
+        /* INS_INT */{ 1, 1,  1,  1,  0,  0,  0,  0,  1 },
     };
     int row = static_cast<int>(request_mode);
     int col = static_cast<int>(group_mode);
@@ -45,6 +58,7 @@ bool LockManager::is_compatible(LockMode request_mode, GroupLockMode group_mode)
 
 void LockManager::update_group_lock_mode(LockRequestQueue& queue) {
     bool has_S = false, has_IX = false, has_IS = false, has_X = false, has_SIX = false;
+    bool has_GAP = false, has_NEXT_KEY = false, has_INSERT_INT = false;
     for (auto& req : queue.request_queue_) {
         if (!req.granted_) continue;
         switch (req.lock_mode_) {
@@ -53,14 +67,21 @@ void LockManager::update_group_lock_mode(LockRequestQueue& queue) {
             case LockMode::INTENTION_SHARED:    has_IS = true; break;
             case LockMode::INTENTION_EXCLUSIVE: has_IX = true; break;
             case LockMode::S_IX:                has_SIX = true; break;
+            case LockMode::GAP:                 has_GAP = true; break;
+            case LockMode::NEXT_KEY:            has_NEXT_KEY = true; break;
+            case LockMode::INSERT_INTENTION:    has_INSERT_INT = true; break;
         }
     }
+    // Priority: strongest lock wins (X > NEXT_KEY > SIX > S > GAP > IX > IS > INSERT_INT)
     if (has_X)               queue.group_lock_mode_ = GroupLockMode::X;
+    else if (has_NEXT_KEY)   queue.group_lock_mode_ = GroupLockMode::NEXT_KEY;
     else if (has_SIX)        queue.group_lock_mode_ = GroupLockMode::SIX;
     else if (has_S && has_IX) queue.group_lock_mode_ = GroupLockMode::SIX;
     else if (has_S)          queue.group_lock_mode_ = GroupLockMode::S;
+    else if (has_GAP)        queue.group_lock_mode_ = GroupLockMode::GAP;
     else if (has_IX)         queue.group_lock_mode_ = GroupLockMode::IX;
     else if (has_IS)         queue.group_lock_mode_ = GroupLockMode::IS;
+    else if (has_INSERT_INT) queue.group_lock_mode_ = GroupLockMode::INSERT_INT;
     else                     queue.group_lock_mode_ = GroupLockMode::NON_LOCK;
 }
 
@@ -217,6 +238,43 @@ bool LockManager::lock_IX_on_table(Transaction* txn, int tab_fd) {
     txn->set_read_only(false);  // Mark as read-write txn for MVCC
     LockDataId lock_data_id(tab_fd, LockDataType::TABLE);
     return lock_common(txn, lock_data_id, LockMode::INTENTION_EXCLUSIVE);
+}
+
+/**
+ * @description: 申请间隙锁（Gap Lock），锁住 rid 对应记录之前的间隙。
+ *               多个事务可同时持有同一间隙锁（互相兼容），
+ *               但与 INSERT_INTENTION 冲突，阻止并发插入。
+ */
+bool LockManager::lock_gap(Transaction* txn, const Rid& rid, int tab_fd) {
+    txn->set_read_only(false);
+    LockDataId lock_data_id(tab_fd, rid, LockDataType::GAP);
+    return lock_common(txn, lock_data_id, LockMode::GAP);
+}
+
+/**
+ * @description: 申请临键锁（Next-Key Lock），同时锁定记录（X锁）及其前驱间隙（GAP锁）。
+ *               用于范围扫描的锁定读（SELECT ... FOR UPDATE），阻止幻读。
+ *               同时获取 X lock + GAP lock 两个独立的锁。
+ */
+bool LockManager::lock_next_key(Transaction* txn, const Rid& rid, int tab_fd) {
+    txn->set_read_only(false);
+    // Acquire record X-lock first
+    LockDataId rec_id(tab_fd, rid, LockDataType::RECORD);
+    if (!lock_common(txn, rec_id, LockMode::EXLUCSIVE)) return false;
+    // Then acquire gap lock on the gap before this record
+    LockDataId gap_id(tab_fd, rid, LockDataType::GAP);
+    return lock_common(txn, gap_id, LockMode::GAP);
+}
+
+/**
+ * @description: 申请插入意向锁（Insert Intention Lock）。
+ *               在 INSERT 执行前调用，检查目标位置是否被 GAP 锁覆盖。
+ *               与 GAP / NEXT_KEY 冲突，多个插入意向锁互相兼容。
+ */
+bool LockManager::lock_insert_intention(Transaction* txn, const Rid& rid, int tab_fd) {
+    txn->set_read_only(false);
+    LockDataId lock_data_id(tab_fd, rid, LockDataType::GAP);
+    return lock_common(txn, lock_data_id, LockMode::INSERT_INTENTION);
 }
 
 /**

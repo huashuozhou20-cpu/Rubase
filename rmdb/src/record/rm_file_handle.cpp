@@ -112,6 +112,9 @@ Rid RmFileHandle::insert_record(char* buf, Context* context) {
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
     Rid rid{page_no, slot_no};
     if (context != nullptr) {
+        // Acquire INSERT_INTENTION first — conflicts with any GAP lock
+        // held by concurrent range-scan FOR UPDATE, preventing phantom inserts.
+        context->lock_mgr_->lock_insert_intention(context->txn_, rid, fd_);
         context->lock_mgr_->lock_exclusive_on_record(context->txn_, rid, fd_);
     }
     return rid;

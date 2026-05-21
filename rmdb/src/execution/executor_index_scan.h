@@ -33,6 +33,11 @@ class IndexScanExecutor : public AbstractExecutor {
     std::unique_ptr<RecScan> scan_;
     bool is_end_;
 
+    // Gap lock state for phantom prevention during FOR UPDATE range scans
+    bool has_match_;       // at least one matching record has been returned
+    Rid guard_rid_;        // first non-matching record (acquire GAP lock on it)
+    bool guard_locked_;    // GAP lock already acquired on the guard
+
     SmManager *sm_manager_;
 
     const ColMeta *get_col_meta(const TabCol &target) {
@@ -219,6 +224,8 @@ class IndexScanExecutor : public AbstractExecutor {
         }
         fed_conds_ = conds_;
         is_end_ = true;
+        has_match_ = false;
+        guard_locked_ = false;
     }
 
     // Returns a visible version of the record at the given rid, following the
@@ -301,12 +308,21 @@ class IndexScanExecutor : public AbstractExecutor {
         scan_ = std::make_unique<IxScan>(ih, lower, upper, sm_manager_->get_bpm());
         delete[] key;
         is_end_ = false;
+        has_match_ = false;
+        guard_locked_ = false;
         nextTuple();
     }
 
     void nextTuple() override {
         bool for_update = use_for_update();
         bool mvcc = !for_update && use_mvcc_read();
+
+        // If we already locked the guard, stop the scan — nothing more to return
+        if (guard_locked_) {
+            is_end_ = true;
+            return;
+        }
+
         while (true) {
             scan_->next();
             if (scan_->is_end()) {
@@ -316,7 +332,27 @@ class IndexScanExecutor : public AbstractExecutor {
             rid_ = scan_->rid();
             if (for_update) {
                 auto rec = fh_->get_record_for_update(rid_, context_);
-                if (check_all_conds(*rec)) return;
+                if (check_all_conds(*rec)) {
+                    // Matching record in range scan: acquire NEXT_KEY lock
+                    // (X lock on record + GAP lock on the gap before it)
+                    // This prevents concurrent inserts into the gap before this record.
+                    LockManager& lm = *context_->lock_mgr_;
+                    int fd = fh_->GetFd();
+                    lm.lock_next_key(context_->txn_, rid_, fd);
+                    has_match_ = true;
+                    return;
+                } else if (has_match_) {
+                    // First non-matching record after a match: guard key.
+                    // Acquire GAP lock to prevent phantom inserts at the tail of our scan.
+                    LockManager& lm = *context_->lock_mgr_;
+                    int fd = fh_->GetFd();
+                    lm.lock_gap(context_->txn_, rid_, fd);
+                    guard_rid_ = rid_;
+                    guard_locked_ = true;
+                    is_end_ = true;
+                    return;
+                }
+                // Non-matching record before first match — continue scanning
             } else if (mvcc) {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;
