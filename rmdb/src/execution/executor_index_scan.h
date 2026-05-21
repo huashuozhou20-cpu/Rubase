@@ -346,43 +346,29 @@ class IndexScanExecutor : public AbstractExecutor {
             rid_ = scan_->rid();
             if (for_update) {
                 auto rec = fh_->get_record_for_update(rid_, context_);
+                // Lock-before-filter: acquire GAP on every index-touched key
+                LockManager& lm = *context_->lock_mgr_;
+                int fd = fh_->GetFd();
+                auto* ix_scan = dynamic_cast<IxScan*>(scan_.get());
+                if (ix_scan) {
+                    const char* key = ix_scan->get_key();
+                    lm.lock_gap_on_key(context_->txn_, fd,
+                        active_index_id_, key, index_meta_.col_tot_len);
+                } else {
+                    lm.lock_gap(context_->txn_, rid_, fd);
+                }
                 if (check_all_conds(*rec)) {
-                    // Matching record in range scan: acquire NEXT_KEY lock.
-                    // X-lock on record (via get_record_for_update) +
-                    // index-key-based GAP lock on the gap before this record.
-                    // This prevents concurrent inserts of keys that fall into
-                    // the logical gap BEFORE this index key.
-                    LockManager& lm = *context_->lock_mgr_;
-                    int fd = fh_->GetFd();
-                    auto* ix_scan = dynamic_cast<IxScan*>(scan_.get());
-                    if (ix_scan) {
-                        const char* key = ix_scan->get_key();
-                        lm.lock_next_key_on_key(context_->txn_, rid_, fd,
-                            active_index_id_, key, index_meta_.col_tot_len);
-                    } else {
-                        lm.lock_next_key(context_->txn_, rid_, fd);
-                    }
                     has_match_ = true;
                     return;
-                } else if (has_match_) {
-                    // First non-matching record after a match: guard key.
-                    // Acquire index-key-based GAP lock to prevent phantom
-                    // inserts at the tail of our scan range.
-                    LockManager& lm = *context_->lock_mgr_;
-                    int fd = fh_->GetFd();
-                    auto* ix_scan = dynamic_cast<IxScan*>(scan_.get());
-                    if (ix_scan) {
-                        const char* key = ix_scan->get_key();
-                        lm.lock_gap_on_key(context_->txn_, fd,
-                            active_index_id_, key, index_meta_.col_tot_len);
-                    } else {
-                        lm.lock_gap(context_->txn_, rid_, fd);
-                    }
+                }
+                if (has_match_) {
+                    // First non-match after a matched/locked record: stop scan
                     guard_locked_ = true;
                     is_end_ = true;
                     return;
                 }
-                // Non-matching record before first match — continue scanning
+                has_match_ = true;
+                // Record locked but filtered — continue scanning
             } else if (mvcc) {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;

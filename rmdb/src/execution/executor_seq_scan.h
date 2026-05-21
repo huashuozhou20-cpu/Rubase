@@ -328,18 +328,18 @@ class SeqScanExecutor : public AbstractExecutor {
         rid_ = scan_->rid();
         if (use_for_update()) {
             auto rec = fh_->get_record_for_update(rid_, context_);
-            if (check_all_conds(*rec)) {
-                // Matching record: acquire NEXT_KEY (X on record + index-key GAP)
-                std::vector<char> idx_key; int key_len = 0;
-                get_index_key(*rec, idx_key, key_len);
-                if (key_len > 0) {
-                    context_->lock_mgr_->lock_gap_on_key(context_->txn_, fh_->GetFd(),
-                        0, idx_key.data(), key_len);
-                } else {
-                    context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
-                }
-                has_match_ = true;
+            // Lock-before-filter: every index-touched record gets a GAP lock
+            // regardless of non-indexed predicate filtering (InnoDB behavior).
+            std::vector<char> idx_key; int key_len = 0;
+            get_index_key(*rec, idx_key, key_len);
+            if (key_len > 0) {
+                context_->lock_mgr_->lock_gap_on_key(context_->txn_, fh_->GetFd(),
+                    0, idx_key.data(), key_len);
             } else {
+                context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+            }
+            has_match_ = true;
+            if (!check_all_conds(*rec)) {
                 nextTuple();
             }
         } else if (use_mvcc_read()) {
@@ -379,35 +379,28 @@ class SeqScanExecutor : public AbstractExecutor {
             rid_ = scan_->rid();
             if (for_update) {
                 auto rec = fh_->get_record_for_update(rid_, context_);
+                // Lock-before-filter: GAP lock on every index-touched record.
+                std::vector<char> idx_key; int key_len = 0;
+                get_index_key(*rec, idx_key, key_len);
+                if (key_len > 0) {
+                    context_->lock_mgr_->lock_gap_on_key(context_->txn_, fh_->GetFd(),
+                        0, idx_key.data(), key_len);
+                } else {
+                    context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                }
                 if (check_all_conds(*rec)) {
-                    // Matching record: NEXT_KEY (X via get_record_for_update + index-key GAP)
-                    std::vector<char> idx_key; int key_len = 0;
-                    get_index_key(*rec, idx_key, key_len);
-                    if (key_len > 0) {
-                        context_->lock_mgr_->lock_gap_on_key(context_->txn_, fh_->GetFd(),
-                            0, idx_key.data(), key_len);
-                    } else {
-                        context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
-                    }
                     has_match_ = true;
                     return;
-                } else if (has_match_) {
-                    // Guard key: GAP lock on the first non-matching record's index key.
-                    // Uses index-key-based LockDataId so INSERTs in this logical gap
-                    // will collide with the same LockDataId and be blocked.
-                    std::vector<char> idx_key; int key_len = 0;
-                    get_index_key(*rec, idx_key, key_len);
-                    if (key_len > 0) {
-                        context_->lock_mgr_->lock_gap_on_key(context_->txn_, fh_->GetFd(),
-                            0, idx_key.data(), key_len);
-                    } else {
-                        context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
-                    }
+                }
+                if (has_match_) {
+                    // First non-match after match (or after first locked record):
+                    // guard GAP already acquired above; stop scan.
                     guard_locked_ = true;
                     is_end_ = true;
                     return;
                 }
-                // Non-match before any match: continue scanning
+                has_match_ = true;
+                // Record locked but predicate-filtered — continue scanning
             } else if (mvcc) {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;
