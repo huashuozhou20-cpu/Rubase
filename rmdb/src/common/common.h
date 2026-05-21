@@ -106,6 +106,7 @@ struct Condition {
     Value rhs_val;    // right-hand side value (also used for LIKE pattern)
     Value rhs_val2;   // BETWEEN high value
     std::vector<Value> in_values;  // IN value list
+    bool is_arith_expr = false;  // LHS is an arithmetic expression → no index scan
 
     // Internal node: OR / NOT children
     std::vector<Condition> children;

@@ -28,6 +28,8 @@ See the Mulan PSL v2 for more details. */
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names) {
     index_col_names.clear();
     for(auto& cond: curr_conds) {
+        // Skip conditions involving arithmetic expressions — cannot use index
+        if (cond.is_arith_expr) continue;
         if(cond.lhs_col.tab_name.compare(tab_name) == 0) {
             // Match OP_EQ (value lookup) or OP_IS_NULL / OP_IS_NOT_NULL
             if ((cond.is_rhs_val && cond.op == OP_EQ) ||

@@ -330,6 +330,27 @@ void Analyze::get_clause(const std::shared_ptr<ast::CondExpr> &cond, std::vector
             } else if (auto lhs_agg = std::dynamic_pointer_cast<ast::AggExpr>(binary->lhs)) {
                 // HAVING agg > N: use the aggregate's column name
                 c.lhs_col = {.tab_name = "", .col_name = lhs_agg->col_name};
+            } else if (auto lhs_arith = std::dynamic_pointer_cast<ast::ArithExpr>(binary->lhs)) {
+                // Arithmetic expression (e.g., age + 1 > 10):
+                // extract the underlying column from the expression tree
+                std::function<std::shared_ptr<ast::Col>(const std::shared_ptr<ast::Expr>&)>
+                find_col = [&](const std::shared_ptr<ast::Expr>& e) -> std::shared_ptr<ast::Col> {
+                    if (!e) return nullptr;
+                    if (auto col = std::dynamic_pointer_cast<ast::Col>(e)) return col;
+                    if (auto arith = std::dynamic_pointer_cast<ast::ArithExpr>(e)) {
+                        auto c = find_col(arith->lhs);
+                        if (c) return c;
+                        return find_col(arith->rhs);
+                    }
+                    return nullptr;
+                };
+                auto lhs_col = find_col(binary->lhs);
+                if (lhs_col) {
+                    c.lhs_col = {.tab_name = lhs_col->tab_name, .col_name = lhs_col->col_name};
+                } else {
+                    c.lhs_col = {.tab_name = "", .col_name = ""};
+                }
+                c.is_arith_expr = true;  // mark for CBO — no index scan
             } else {
                 // unknown lhs expression — skip
                 c.lhs_col = {.tab_name = "", .col_name = ""};
@@ -401,6 +422,11 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
         if (!cond.is_rhs_val && cond.op != OP_IS_NULL && cond.op != OP_IS_NOT_NULL
             && cond.op != OP_IN && cond.op != OP_NOT_IN) {
             cond.rhs_col = check_column(all_cols, cond.rhs_col);
+        }
+        // Skip type checking for expressions where column couldn't be resolved
+        // (e.g., complex arithmetic expressions — filtering left to executor)
+        if (cond.lhs_col.tab_name.empty() && cond.lhs_col.col_name.empty()) {
+            return;
         }
         TabMeta &lhs_tab = sm_manager_->db_.get_table(cond.lhs_col.tab_name);
         auto lhs_col = lhs_tab.get_col(cond.lhs_col.col_name);
