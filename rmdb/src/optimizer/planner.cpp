@@ -21,6 +21,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_update.h"
 #include "index/ix.h"
+#include "record/rm_file_handle.h"
 #include "record_printer.h"
 
 // 目前的索引匹配规则为：完全匹配索引字段，且全部为单点查询，不会自动调整where条件的顺序
@@ -222,6 +223,31 @@ std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> quer
 
 
 
+int64_t Planner::estimate_row_count(const std::string &tab_name) {
+    auto it = sm_manager_->fhs_.find(tab_name);
+    if (it != sm_manager_->fhs_.end() && it->second) {
+        auto fhdr = it->second->get_file_hdr();
+        return static_cast<int64_t>(fhdr.num_pages) * fhdr.num_records_per_page;
+    }
+    return 0;
+}
+
+// Detect if a set of join conditions includes an equi-join (cross-table OP_EQ).
+// Returns true and identifies the join column tab names.
+static bool is_equi_join(const std::vector<Condition> &conds,
+                         std::string &tab_a, std::string &tab_b) {
+    for (auto &c : conds) {
+        if (!c.is_rhs_val && c.op == OP_EQ &&
+            c.lhs_col.tab_name != c.rhs_col.tab_name &&
+            !c.lhs_col.tab_name.empty() && !c.rhs_col.tab_name.empty()) {
+            tab_a = c.lhs_col.tab_name;
+            tab_b = c.rhs_col.tab_name;
+            return true;
+        }
+    }
+    return false;
+}
+
 std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
 {
     auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
@@ -256,8 +282,27 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
         return nullptr;
     };
 
-    // 选择 join 算法
-    auto choose_join_tag = [&]() {
+    // CBO: choose join algorithm and determine build/probe sides
+    auto choose_join = [&](std::shared_ptr<Plan> &left, std::shared_ptr<Plan> &right,
+                            std::vector<Condition> &join_conds) -> PlanTag {
+        // Detect equi-join
+        std::string tab_a, tab_b;
+        bool is_equi = is_equi_join(join_conds, tab_a, tab_b);
+
+        if (is_equi && enable_hashjoin_join) {
+            // CBO: route small table to build (left) side
+            auto left_scan = std::dynamic_pointer_cast<ScanPlan>(left);
+            auto right_scan = std::dynamic_pointer_cast<ScanPlan>(right);
+            if (left_scan && right_scan) {
+                int64_t left_rows = estimate_row_count(left_scan->tab_name_);
+                int64_t right_rows = estimate_row_count(right_scan->tab_name_);
+                if (left_rows > right_rows) {
+                    std::swap(left, right);
+                }
+            }
+            return T_HashJoin;
+        }
+
         if (!enable_nestedloop_join && enable_sortmerge_join) return T_SortMerge;
         return T_NestLoop;
     };
@@ -286,7 +331,8 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
                 }
             }
 
-            table_join_executors = std::make_shared<JoinPlan>(choose_join_tag(),
+            auto tag = choose_join(table_join_executors, right, join_conds);
+            table_join_executors = std::make_shared<JoinPlan>(tag,
                 std::move(table_join_executors), std::move(right), join_conds, item.join_type);
         }
 
@@ -309,7 +355,8 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
                 left = pop_scan(scantbl, it->lhs_col.tab_name, joined_tables, table_scan_executors);
                 right = pop_scan(scantbl, it->rhs_col.tab_name, joined_tables, table_scan_executors);
                 std::vector<Condition> join_conds{*it};
-                table_join_executors = std::make_shared<JoinPlan>(choose_join_tag(),
+                auto tag = choose_join(left, right, join_conds);
+                table_join_executors = std::make_shared<JoinPlan>(tag,
                     std::move(left), std::move(right), join_conds);
                 it = conds.erase(it);
                 break;
@@ -327,7 +374,8 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
                 }
                 if (left_need && right_need) {
                     std::vector<Condition> jc{*it};
-                    auto temp = std::make_shared<JoinPlan>(T_NestLoop, std::move(left_need),
+                    auto tag = choose_join(left_need, right_need, jc);
+                    auto temp = std::make_shared<JoinPlan>(tag, std::move(left_need),
                         std::move(right_need), jc);
                     table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(temp),
                         std::move(table_join_executors), std::vector<Condition>());

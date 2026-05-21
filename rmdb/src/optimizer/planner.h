@@ -32,6 +32,7 @@ class Planner {
 
     bool enable_nestedloop_join = true;
     bool enable_sortmerge_join = false;
+    bool enable_hashjoin_join = true;
 
    public:
     Planner(SmManager *sm_manager) : sm_manager_(sm_manager) {}
@@ -42,8 +43,9 @@ class Planner {
     void set_enable_nestedloop_join(bool set_val) { enable_nestedloop_join = set_val; }
     
     void set_enable_sortmerge_join(bool set_val) { enable_sortmerge_join = set_val; }
-    
+
    private:
+    int64_t estimate_row_count(const std::string &tab_name);
     std::shared_ptr<Query> logical_optimization(std::shared_ptr<Query> query, Context *context);
     std::shared_ptr<Plan> physical_optimization(std::shared_ptr<Query> query, Context *context);
 

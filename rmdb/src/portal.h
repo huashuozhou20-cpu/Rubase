@@ -17,6 +17,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_abstract.h"
 #include "execution/executor_nestedloop_join.h"
 #include "execution/executor_sortmerge_join.h"
+#include "execution/executor_hash_join.h"
 #include "execution/executor_projection.h"
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_index_scan.h"
@@ -195,8 +196,11 @@ class Portal
             }
 
             std::unique_ptr<AbstractExecutor> join;
-            if (false) {
-                // SortMerge disabled — has known issues with column offset resolution
+            if (x->tag == T_HashJoin && !equi_conds.empty()) {
+                join = std::make_unique<HashJoinExecutor>(
+                    std::move(left), std::move(right),
+                    std::move(x->conds_), std::move(equi_conds), join_type);
+            } else if (x->tag == T_SortMerge) {
                 join = std::make_unique<SortMergeJoinExecutor>(
                     std::move(left), std::move(right),
                     std::move(x->conds_), std::move(equi_conds), join_type);
