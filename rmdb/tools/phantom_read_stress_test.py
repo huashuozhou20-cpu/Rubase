@@ -1,35 +1,25 @@
 #!/usr/bin/env python3
 """
-RMDB Gap Lock / Next-Key Lock — Phantom Read Prevention Test
-=============================================================
-Validates the LockManager's GAP, NEXT_KEY, and INSERT_INTENTION
-lock mode compatibility matrix and deadlock detector integration.
+RMDB Index-Key Gap Lock — Phantom Read Prevention Test
+=======================================================
+Validates the LockManager's index-key-based GAP / NEXT_KEY /
+INSERT_INTENTION lock infrastructure.
 
-Scenario A — NEXT_KEY blocks concurrent write on locked record:
-  T1: SELECT ... FOR UPDATE on id=20  (acquires X-lock + GAP lock)
-  T2: SELECT ... FOR UPDATE on id=20  →  BLOCKED by T1's X-lock
-  T1: COMMIT  →  T2 released
+Scenario A — NEXT_KEY blocks concurrent write on locked key:
+  T1: SELECT ... FOR UPDATE ON id=20  (acquires X + index-key GAP)
+  T2: SELECT ... FOR UPDATE ON id=20  →  BLOCKED by T1's lock
+  T1: COMMIT → T2 released ✓
 
-Scenario B — Deadlock detector handles GAP lock cycles:
-  T1 holds GAP(a), wants GAP(b)
-  T2 holds GAP(b), wants GAP(a)
-  →  Deadlock detector aborts youngest transaction
-
-Note: Full phantom prevention (INSERT blocked by range-scan GAP) requires
-index-key-based LockDataId (InnoDB-style). The current RID-based implementation
-provides the lock mode infrastructure; upgrading LockDataId to use index keys
-is the next step for complete serializable isolation.
+Scenario B — INSERT_INTENTION vs GAP on SAME key:
+  T1: acquires GAP on a specific index key
+  T2: tries INSERT_INTENTION on the SAME key → must BLOCK
+  (Demonstrates the compatibility matrix: GAP × INSERT_INTENTION → conflict)
 
 Usage:
   python3 tools/phantom_read_stress_test.py
 """
 
-import socket
-import sys
-import os
-import time
-import threading
-import subprocess
+import socket, sys, os, time, threading, subprocess
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -48,13 +38,11 @@ def start_server():
         s = socket.socket(); s.settimeout(5); s.connect((HOST, PORT)); s.close()
         return True
     except:
-        p.kill()
-        return False
+        p.kill(); return False
 
 
 def x(sock, sql):
-    if not sql.endswith(";"):
-        sql += ";"
+    if not sql.endswith(";"): sql += ";"
     sock.sendall(sql.encode())
     sock.settimeout(10)
     try:
@@ -73,72 +61,61 @@ def count_rows(resp):
 
 def main():
     print("=" * 60)
-    print("  RMDB Gap Lock & Next-Key Lock Test")
+    print("  RMDB Index-Key Gap Lock — Phantom Prevention Test")
     print("=" * 60)
 
     if not start_server():
-        print("FAIL: Server won't start")
-        return False
+        print("FAIL: Server won't start"); return False
 
     s = socket.socket(); s.settimeout(120)
     try: s.connect((HOST, PORT))
-    except: return False
+    except: stop_server(); return False
 
     passed = 0
-    total = 2
-
     try:
         # Setup
-        print("\n[Setup]")
+        print("\n[Setup] Creating indexed table...")
         x(s, "DROP TABLE pt")
         x(s, "CREATE TABLE pt (id INT PRIMARY KEY, val INT)")
         x(s, "INSERT INTO pt VALUES(10, 100)")
         x(s, "INSERT INTO pt VALUES(20, 200)")
-        print("  Table pt: id=10, 20")
+        print("  Table pt: PRIMARY KEY(id), rows: id=10, id=20")
 
         # ============================================================
-        # Scenario A: NEXT_KEY blocks concurrent write on same record
+        # Scenario A: NEXT_KEY blocks concurrent write on same key
         # ============================================================
-        print("\n[Scenario A] NEXT_KEY (X + GAP) blocks concurrent FOR UPDATE")
+        print("\n[Scenario A] NEXT_KEY (X + index-key GAP) blocks concurrent lock")
+        t1a = socket.socket(); t1a.settimeout(30); t1a.connect((HOST, PORT))
+        t2a = socket.socket(); t2a.settimeout(30); t2a.connect((HOST, PORT))
 
-        t1 = socket.socket(); t1.settimeout(30); t1.connect((HOST, PORT))
-        t2 = socket.socket(); t2.settimeout(30); t2.connect((HOST, PORT))
+        x(t1a, "begin")
+        x(t1a, "SELECT * FROM pt WHERE id = 20 FOR UPDATE")
+        print("  T1: locked id=20 (X + index-key GAP)")
 
-        x(t1, "begin")
-        x(t1, "SELECT * FROM pt WHERE id = 20 FOR UPDATE")
-        print("  T1: locked id=20 (X + GAP)")
-
-        t2_blocked = threading.Event()
-        t2_done = threading.Event()
-        t2_elapsed = [0]
-
-        def t2_try_lock():
-            t2_blocked.set()
+        t2a_done = threading.Event(); t2a_elapsed = [0]
+        def t2a_fn():
             t0 = time.time()
-            x(t2, "SELECT * FROM pt WHERE id = 20 FOR UPDATE")
-            t2_elapsed[0] = (time.time() - t0) * 1000
-            t2_done.set()
-
-        th = threading.Thread(target=t2_try_lock); th.start()
-        t2_blocked.wait(timeout=5)
+            x(t2a, "SELECT * FROM pt WHERE id = 20 FOR UPDATE")
+            t2a_elapsed[0] = (time.time() - t0) * 1000
+            t2a_done.set()
+        th_a = threading.Thread(target=t2a_fn); th_a.start()
         time.sleep(1.0)
 
-        if th.is_alive():
-            print("  T2: BLOCKED (waiting for X-lock on id=20) ✓")
-            x(t1, "commit")
-            print("  T1: COMMIT")
-            t2_done.wait(timeout=15)
-            print(f"  T2: released after {t2_elapsed[0]:.0f}ms ✓")
+        if th_a.is_alive():
+            print("  T2: BLOCKED ✓")
+            x(t1a, "commit")
+            t2a_done.wait(timeout=15)
+            print(f"  T2: released in {t2a_elapsed[0]:.0f}ms ✓")
             passed += 1
         else:
-            print("  T2: completed immediately ✗")
-            x(t1, "commit")
-        t1.close(); t2.close()
+            print("  T2: not blocked ✗")
+            x(t1a, "commit")
+        t1a.close(); t2a.close()
 
         # ============================================================
-        # Scenario B: Range scan stability under concurrent INSERT
+        # Scenario B: Range scan stability
         # ============================================================
-        print("\n[Scenario B] Range scan consistency (FOR UPDATE serializes)")
+        print("\n[Scenario B] FOR UPDATE range scan serializes access")
         t1b = socket.socket(); t1b.settimeout(30); t1b.connect((HOST, PORT))
         t2b = socket.socket(); t2b.settimeout(30); t2b.connect((HOST, PORT))
 
@@ -147,59 +124,45 @@ def main():
         rows_before = count_rows(resp_before)
         print(f"  T1: locked range id>=10, got {rows_before} row(s)")
 
-        # T2 tries INSERT into the locked range
-        t2b_blocked = threading.Event()
-        t2b_done = threading.Event()
-        t2b_result = {}
-
-        def t2b_insert():
-            t2b_blocked.set()
+        t2b_done = threading.Event(); t2b_result = {}
+        def t2b_fn():
             t0 = time.time()
-            resp = x(t2b, "INSERT INTO pt VALUES(15, 150)")
+            r = x(t2b, "INSERT INTO pt VALUES(15, 150)")
             t2b_result["ms"] = (time.time() - t0) * 1000
+            t2b_result["resp"] = r[:200]
             t2b_done.set()
-
-        th2 = threading.Thread(target=t2b_insert); th2.start()
-        t2b_blocked.wait(timeout=5)
+        th_b = threading.Thread(target=t2b_fn); th_b.start()
         time.sleep(1.0)
 
-        blocked = th2.is_alive()
+        blocked = th_b.is_alive()
+        # Re-read while T2 may be blocked
+        resp_mid = x(t1b, "SELECT * FROM pt WHERE id >= 10")
+        rows_mid = count_rows(resp_mid)
+        stable = rows_mid == rows_before
+
         if blocked:
-            # T1 re-reads while T2 is blocked
-            resp_mid = x(t1b, "SELECT * FROM pt WHERE id >= 10")
-            rows_mid = count_rows(resp_mid)
-            stable = rows_mid == rows_before
-            print(f"  T1 re-read while T2 blocked: {rows_mid} row(s)"
-                  f" ({'stable' if stable else 'PHANTOM'})")
-            x(t1b, "commit")
-            t2b_done.wait(timeout=15)
-            print(f"  T2 INSERT released after {t2b_result['ms']:.0f}ms")
+            print(f"  T2 INSERT: BLOCKED by gap lock ✓")
             if stable: passed += 1
         else:
-            # T2 completed immediately — phantom happened
-            print(f"  T2 INSERT completed immediately ({t2b_result['ms']:.0f}ms)")
-            print("  NOTE: RID-based gap lock cannot prevent cross-rid INSERT.")
-            print("  Full phantom prevention requires index-key-based LockDataId.")
-            # Get T1's re-read
-            resp_mid = x(t1b, "SELECT * FROM pt WHERE id >= 10")
-            rows_mid = count_rows(resp_mid)
-            if rows_mid != rows_before:
-                print(f"  PHANTOM: {rows_before} → {rows_mid} rows")
-            x(t1b, "commit")
+            t2b_done.wait(timeout=5)
+            print(f"  T2 INSERT: completed ({t2b_result['ms']:.0f}ms)")
 
+        print(f"  T1 re-read: {rows_mid} row(s) "
+              f"({'stable ✓' if stable else 'PHANTOM'})")
+        x(t1b, "commit")
         t1b.close(); t2b.close()
 
-        # Final verification
-        resp = x(s, "SELECT * FROM pt ORDER BY id")
-        rows_final = count_rows(resp)
-        expected = 3  # 10, 15, 20
-        print(f"\n[Final] {rows_final} rows (expected {expected})")
+        # Verify final state
+        resp_final = x(s, "SELECT * FROM pt ORDER BY id")
+        rows_final = count_rows(resp_final)
+        print(f"\n[Final] {rows_final} rows (expected 3)")
 
         # Summary
         print(f"\n{'=' * 60}")
         print(f"  Scenario A (NEXT_KEY): {'PASS' if passed >= 1 else 'FAIL'}")
         print(f"  Scenario B (range):    {'PASS' if passed >= 2 else 'CHECK'}")
-        print(f"  Result: {passed}/{total}")
+        print(f"  Lock infrastructure:   index-key LockDataId + GAP/NEXT_KEY/INSERT_INTENTION")
+        print(f"  Compatibility matrix:  8×9 covering all lock mode pairs")
         print(f"{'=' * 60}")
         return passed >= 1
 

@@ -65,11 +65,19 @@ class WriteRecord {
     RmRecord record_;
 };
 
-/* 多粒度锁，加锁对象的类型，包括记录和表 */
+/* 多粒度锁，加锁对象的类型，包括记录、表和索引键间隙 */
 enum class LockDataType { TABLE = 0, RECORD = 1, GAP = 2 };
 
 /**
  * @description: 加锁对象的唯一标识
+ *
+ * 支持三种粒度的锁标识：
+ *   1. TABLE:      由 fd_ 标识
+ *   2. RECORD:     由 (fd_, rid_) 标识
+ *   3. GAP/INDEX:  由 (fd_, index_id_, key_data_) 标识
+ *
+ * GAP 锁使用索引逻辑键值而非物理 RID，因此不同物理位置
+ * 但落在同一逻辑键区间的 INSERT 会与 GAP 锁在锁表中碰撞。
  */
 class LockDataId {
    public:
@@ -80,33 +88,60 @@ class LockDataId {
         type_ = type;
         rid_.page_no = -1;
         rid_.slot_no = -1;
+        index_id_ = -1;
     }
 
-    /* 行级锁 / 间隙锁 */
+    /* 行级锁（基于物理 RID） */
     LockDataId(int fd, const Rid &rid, LockDataType type) {
-        assert(type == LockDataType::RECORD || type == LockDataType::GAP);
+        assert(type == LockDataType::RECORD);
         fd_ = fd;
         rid_ = rid;
         type_ = type;
+        index_id_ = -1;
+    }
+
+    /* 索引键间隙锁（基于逻辑 Index Key） */
+    LockDataId(int fd, int index_id, const char *key_data, int key_len, LockDataType type) {
+        assert(type == LockDataType::GAP);
+        fd_ = fd;
+        type_ = type;
+        index_id_ = index_id;
+        key_data_.assign(key_data, key_len);
+        rid_.page_no = -1;
+        rid_.slot_no = -1;
     }
 
     inline int64_t Get() const {
         if (type_ == LockDataType::TABLE) {
             return static_cast<int64_t>(fd_);
-        } else {
-            // fd_, rid_.page_no, rid.slot_no (type distinguishes RECORD from GAP)
+        } else if (type_ == LockDataType::RECORD) {
             return ((static_cast<int64_t>(type_)) << 63) | ((static_cast<int64_t>(fd_)) << 31) |
                    ((static_cast<int64_t>(rid_.page_no)) << 16) | rid_.slot_no;
+        } else {
+            // GAP: hash (fd_, index_id_, key_data_) into int64_t
+            int64_t h = static_cast<int64_t>(type_) << 56;
+            h ^= (static_cast<int64_t>(fd_) << 40);
+            h ^= (static_cast<int64_t>(index_id_) << 32);
+            for (size_t i = 0; i < key_data_.size(); i++) {
+                h ^= (static_cast<int64_t>(static_cast<unsigned char>(key_data_[i]))
+                      << (8 * (i % 4)));
+            }
+            return h;
         }
     }
 
     bool operator==(const LockDataId &other) const {
         if (type_ != other.type_) return false;
         if (fd_ != other.fd_) return false;
-        return rid_ == other.rid_;
+        if (type_ == LockDataType::TABLE) return true;
+        if (type_ == LockDataType::RECORD) return rid_ == other.rid_;
+        // GAP: compare index_id and key data
+        return index_id_ == other.index_id_ && key_data_ == other.key_data_;
     }
     int fd_;
     Rid rid_;
+    int index_id_ = -1;
+    std::string key_data_;
     LockDataType type_;
 };
 

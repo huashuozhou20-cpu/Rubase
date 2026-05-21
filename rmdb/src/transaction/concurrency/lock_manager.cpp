@@ -277,6 +277,51 @@ bool LockManager::lock_insert_intention(Transaction* txn, const Rid& rid, int ta
     return lock_common(txn, lock_data_id, LockMode::INSERT_INTENTION);
 }
 
+// ============================================================================
+// Index-Key-based Gap Lock methods
+// ============================================================================
+
+/**
+ * @description: 基于索引键的间隙锁（Gap Lock on Index Key）。
+ *               锁住由 key_data 标识的索引键之前的逻辑间隙。
+ *               多个事务可同时持有同一间隙锁（互相兼容），
+ *               但与 INSERT_INTENTION 冲突。
+ */
+bool LockManager::lock_gap_on_key(Transaction* txn, int tab_fd, int index_id,
+                                   const char* key_data, int key_len) {
+    txn->set_read_only(false);
+    LockDataId lock_data_id(tab_fd, index_id, key_data, key_len, LockDataType::GAP);
+    return lock_common(txn, lock_data_id, LockMode::GAP);
+}
+
+/**
+ * @description: 基于索引键的临键锁（Next-Key Lock on Index Key）。
+ *               同时锁定记录（X锁，基于RID）及其前驱逻辑间隙（GAP锁，基于索引键）。
+ *               用于范围扫描的锁定读（SELECT ... FOR UPDATE），阻止幻读。
+ */
+bool LockManager::lock_next_key_on_key(Transaction* txn, const Rid& rid, int tab_fd,
+                                        int index_id, const char* key_data, int key_len) {
+    txn->set_read_only(false);
+    // Acquire record X-lock first (RID-based)
+    LockDataId rec_id(tab_fd, rid, LockDataType::RECORD);
+    if (!lock_common(txn, rec_id, LockMode::EXLUCSIVE)) return false;
+    // Then acquire index-key-based GAP lock on the gap before this key
+    LockDataId gap_id(tab_fd, index_id, key_data, key_len, LockDataType::GAP);
+    return lock_common(txn, gap_id, LockMode::GAP);
+}
+
+/**
+ * @description: 基于索引键的插入意向锁（Insert Intention Lock on Index Key）。
+ *               在 INSERT 执行前调用，传入新记录在索引中的逻辑键值。
+ *               与同一键值上的 GAP / NEXT_KEY 锁冲突，防止幻读插入。
+ */
+bool LockManager::lock_insert_intention_on_key(Transaction* txn, int tab_fd, int index_id,
+                                                const char* key_data, int key_len) {
+    txn->set_read_only(false);
+    LockDataId lock_data_id(tab_fd, index_id, key_data, key_len, LockDataType::GAP);
+    return lock_common(txn, lock_data_id, LockMode::INSERT_INTENTION);
+}
+
 /**
  * @description: 释放锁
  */

@@ -65,6 +65,15 @@ public:
     bool lock_IX_on_table(Transaction* txn, int tab_fd);
 
     // Gap lock / Next-Key lock / Insert Intention (phantom prevention)
+    // Index-key-based variants: identify gaps by logical key, not physical RID
+    bool lock_gap_on_key(Transaction* txn, int tab_fd, int index_id,
+                         const char* key_data, int key_len);
+    bool lock_next_key_on_key(Transaction* txn, const Rid& rid, int tab_fd,
+                              int index_id, const char* key_data, int key_len);
+    bool lock_insert_intention_on_key(Transaction* txn, int tab_fd, int index_id,
+                                      const char* key_data, int key_len);
+
+    // Legacy RID-based variants (for backwards compat, delegate to index-key if needed)
     bool lock_gap(Transaction* txn, const Rid& rid, int tab_fd);
     bool lock_next_key(Transaction* txn, const Rid& rid, int tab_fd);
     bool lock_insert_intention(Transaction* txn, const Rid& rid, int tab_fd);

@@ -32,6 +32,9 @@ class SeqScanExecutor : public AbstractExecutor {
     // Gap lock state for phantom prevention during FOR UPDATE range scans
     bool has_match_;       // at least one matching record has been returned
     bool guard_locked_;    // GAP lock acquired on the first non-matching record after match
+    bool has_index_;       // whether the table has at least one index for gap locking
+    int index_key_len_;    // total length of the first index key
+    std::vector<std::pair<int,int>> idx_col_offsets_;  // (offset, len) for key extraction
 
     SmManager *sm_manager_;
 
@@ -215,6 +218,23 @@ class SeqScanExecutor : public AbstractExecutor {
         fh_ = sm_manager_->fhs_.at(tab_name_).get();
         cols_ = tab.cols;
         len_ = cols_.back().offset + cols_.back().len;
+        // Pre-compute index metadata for gap key extraction
+        has_index_ = !tab.indexes.empty();
+        if (has_index_) {
+            auto &idx = tab.indexes[0];
+            index_key_len_ = idx.col_tot_len;
+            for (auto &idx_col : idx.cols) {
+                // Find the matching table column to get its offset
+                for (auto &col : tab.cols) {
+                    if (col.name == idx_col.name) {
+                        idx_col_offsets_.push_back({col.offset, col.len});
+                        break;
+                    }
+                }
+            }
+        } else {
+            index_key_len_ = 0;
+        }
 
         context_ = context;
         fed_conds_ = conds_;
@@ -285,6 +305,17 @@ class SeqScanExecutor : public AbstractExecutor {
 
     bool use_for_update() const { return context_->is_for_update_; }
 
+    void get_index_key(const RmRecord &rec, std::vector<char> &key_buf, int &key_len) {
+        if (!has_index_) { key_len = 0; return; }
+        key_buf.resize(index_key_len_);
+        int pos = 0;
+        for (auto &oc : idx_col_offsets_) {
+            memcpy(key_buf.data() + pos, rec.data + oc.first, oc.second);
+            pos += oc.second;
+        }
+        key_len = index_key_len_;
+    }
+
     void beginTuple() override {
         has_match_ = false;
         guard_locked_ = false;
@@ -298,8 +329,15 @@ class SeqScanExecutor : public AbstractExecutor {
         if (use_for_update()) {
             auto rec = fh_->get_record_for_update(rid_, context_);
             if (check_all_conds(*rec)) {
-                // Matching record: acquire NEXT_KEY lock (X on record + GAP before it)
-                context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                // Matching record: acquire NEXT_KEY (X on record + index-key GAP)
+                std::vector<char> idx_key; int key_len = 0;
+                get_index_key(*rec, idx_key, key_len);
+                if (key_len > 0) {
+                    context_->lock_mgr_->lock_gap_on_key(context_->txn_, fh_->GetFd(),
+                        0, idx_key.data(), key_len);
+                } else {
+                    context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                }
                 has_match_ = true;
             } else {
                 nextTuple();
@@ -342,14 +380,29 @@ class SeqScanExecutor : public AbstractExecutor {
             if (for_update) {
                 auto rec = fh_->get_record_for_update(rid_, context_);
                 if (check_all_conds(*rec)) {
-                    // Matching record: acquire NEXT_KEY (X on record via get_record_for_update + GAP)
-                    context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                    // Matching record: NEXT_KEY (X via get_record_for_update + index-key GAP)
+                    std::vector<char> idx_key; int key_len = 0;
+                    get_index_key(*rec, idx_key, key_len);
+                    if (key_len > 0) {
+                        context_->lock_mgr_->lock_gap_on_key(context_->txn_, fh_->GetFd(),
+                            0, idx_key.data(), key_len);
+                    } else {
+                        context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                    }
                     has_match_ = true;
                     return;
                 } else if (has_match_) {
-                    // First non-matching record after a match: GAP lock on guard key
-                    // Prevents phantom inserts at the tail of our scan range.
-                    context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                    // Guard key: GAP lock on the first non-matching record's index key.
+                    // Uses index-key-based LockDataId so INSERTs in this logical gap
+                    // will collide with the same LockDataId and be blocked.
+                    std::vector<char> idx_key; int key_len = 0;
+                    get_index_key(*rec, idx_key, key_len);
+                    if (key_len > 0) {
+                        context_->lock_mgr_->lock_gap_on_key(context_->txn_, fh_->GetFd(),
+                            0, idx_key.data(), key_len);
+                    } else {
+                        context_->lock_mgr_->lock_gap(context_->txn_, rid_, fh_->GetFd());
+                    }
                     guard_locked_ = true;
                     is_end_ = true;
                     return;

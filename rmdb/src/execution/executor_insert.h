@@ -130,6 +130,23 @@ class InsertExecutor : public AbstractExecutor {
                     }
                 }
             }
+            // Acquire INSERT_INTENTION on the first index key BEFORE inserting.
+            // This conflicts with any GAP/NEXT_KEY lock on the same logical key,
+            // preventing phantom inserts into guarded index ranges.
+            if (context_ != nullptr && context_->lock_mgr_ != nullptr
+                && !tab_.indexes.empty()) {
+                auto& first_idx = tab_.indexes[0];
+                std::vector<char> idx_key(first_idx.col_tot_len);
+                int off = 0;
+                for (const auto& col : first_idx.cols) {
+                    memcpy(idx_key.data() + off, rec.data + col.offset, col.len);
+                    off += col.len;
+                }
+                context_->lock_mgr_->lock_insert_intention_on_key(
+                    context_->txn_, fh_->GetFd(), 0 /* primary index */,
+                    idx_key.data(), first_idx.col_tot_len);
+            }
+
             // Insert into record file
             rid_ = fh_->insert_record(rec.data, context_);
 

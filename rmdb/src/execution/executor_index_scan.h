@@ -35,8 +35,8 @@ class IndexScanExecutor : public AbstractExecutor {
 
     // Gap lock state for phantom prevention during FOR UPDATE range scans
     bool has_match_;       // at least one matching record has been returned
-    Rid guard_rid_;        // first non-matching record (acquire GAP lock on it)
     bool guard_locked_;    // GAP lock already acquired on the guard
+    int active_index_id_;  // which index we're scanning (0=primary, etc.)
 
     SmManager *sm_manager_;
 
@@ -203,6 +203,20 @@ class IndexScanExecutor : public AbstractExecutor {
         conds_ = std::move(conds);
         index_col_names_ = index_col_names;
         index_meta_ = *(tab_.get_index_meta(index_col_names_));
+        // Find which index this is (0 = primary, etc.)
+        active_index_id_ = 0;
+        for (size_t i = 0; i < tab_.indexes.size(); i++) {
+            if (tab_.indexes[i].col_tot_len == index_meta_.col_tot_len &&
+                tab_.indexes[i].cols.size() == index_meta_.cols.size()) {
+                bool match = true;
+                for (size_t j = 0; j < index_meta_.cols.size(); j++) {
+                    if (tab_.indexes[i].cols[j].name != index_meta_.cols[j].name) {
+                        match = false; break;
+                    }
+                }
+                if (match) { active_index_id_ = static_cast<int>(i); break; }
+            }
+        }
         fh_ = sm_manager_->fhs_.at(tab_name_).get();
         cols_ = tab_.cols;
         len_ = cols_.back().offset + cols_.back().len;
@@ -333,21 +347,37 @@ class IndexScanExecutor : public AbstractExecutor {
             if (for_update) {
                 auto rec = fh_->get_record_for_update(rid_, context_);
                 if (check_all_conds(*rec)) {
-                    // Matching record in range scan: acquire NEXT_KEY lock
-                    // (X lock on record + GAP lock on the gap before it)
-                    // This prevents concurrent inserts into the gap before this record.
+                    // Matching record in range scan: acquire NEXT_KEY lock.
+                    // X-lock on record (via get_record_for_update) +
+                    // index-key-based GAP lock on the gap before this record.
+                    // This prevents concurrent inserts of keys that fall into
+                    // the logical gap BEFORE this index key.
                     LockManager& lm = *context_->lock_mgr_;
                     int fd = fh_->GetFd();
-                    lm.lock_next_key(context_->txn_, rid_, fd);
+                    auto* ix_scan = dynamic_cast<IxScan*>(scan_.get());
+                    if (ix_scan) {
+                        const char* key = ix_scan->get_key();
+                        lm.lock_next_key_on_key(context_->txn_, rid_, fd,
+                            active_index_id_, key, index_meta_.col_tot_len);
+                    } else {
+                        lm.lock_next_key(context_->txn_, rid_, fd);
+                    }
                     has_match_ = true;
                     return;
                 } else if (has_match_) {
                     // First non-matching record after a match: guard key.
-                    // Acquire GAP lock to prevent phantom inserts at the tail of our scan.
+                    // Acquire index-key-based GAP lock to prevent phantom
+                    // inserts at the tail of our scan range.
                     LockManager& lm = *context_->lock_mgr_;
                     int fd = fh_->GetFd();
-                    lm.lock_gap(context_->txn_, rid_, fd);
-                    guard_rid_ = rid_;
+                    auto* ix_scan = dynamic_cast<IxScan*>(scan_.get());
+                    if (ix_scan) {
+                        const char* key = ix_scan->get_key();
+                        lm.lock_gap_on_key(context_->txn_, fd,
+                            active_index_id_, key, index_meta_.col_tot_len);
+                    } else {
+                        lm.lock_gap(context_->txn_, rid_, fd);
+                    }
                     guard_locked_ = true;
                     is_end_ = true;
                     return;

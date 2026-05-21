@@ -42,4 +42,9 @@ class IxScan : public RecScan {
     Rid rid() const override;
 
     const Iid &iid() const { return iid_; }
+
+    // Return the raw index key bytes at the current scan position.
+    const char* get_key() const {
+        return curr_node_->get_key(iid_.slot_no);
+    }
 };
