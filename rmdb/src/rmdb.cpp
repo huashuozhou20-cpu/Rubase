@@ -122,6 +122,10 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
                         else
                             binary->rhs = std::make_shared<ast::FloatLit>(0);
                     }
+                } else {
+                    // Empty set: replace with NULL so the outer comparison
+                    // evaluates to NULL (false in WHERE context → 0 rows).
+                    binary->rhs = std::make_shared<ast::NullLit>();
                 }
                 txn_manager->commit(sub_txn, log_manager.get());
             } catch (RMDBError &e) {
