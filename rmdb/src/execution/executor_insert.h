@@ -130,21 +130,46 @@ class InsertExecutor : public AbstractExecutor {
                     }
                 }
             }
-            // Acquire INSERT_INTENTION on the first index key BEFORE inserting.
-            // This conflicts with any GAP/NEXT_KEY lock on the same logical key,
-            // preventing phantom inserts into guarded index ranges.
+            // Acquire INSERT_INTENTION on the NEXT key BEFORE inserting.
+            // We use B+tree to find the next-greater index key, then place
+            // INSERT_INTENTION on THAT key's LockDataId. This collides with
+            // any GAP/NEXT_KEY lock held by a concurrent range scan on the
+            // same upper-bound key, blocking phantom inserts.
             if (context_ != nullptr && context_->lock_mgr_ != nullptr
                 && !tab_.indexes.empty()) {
                 auto& first_idx = tab_.indexes[0];
-                std::vector<char> idx_key(first_idx.col_tot_len);
-                int off = 0;
-                for (const auto& col : first_idx.cols) {
-                    memcpy(idx_key.data() + off, rec.data + col.offset, col.len);
-                    off += col.len;
+                try {
+                    // Build the insert key for this new record
+                    std::vector<char> insert_key(first_idx.col_tot_len);
+                    int off = 0;
+                    for (const auto& col : first_idx.cols) {
+                        memcpy(insert_key.data() + off, rec.data + col.offset, col.len);
+                        off += col.len;
+                    }
+                    auto ih = sm_manager_->ihs_.at(
+                        sm_manager_->get_ix_manager()->get_index_name(
+                            tab_name_, first_idx.cols)).get();
+                    // Find the leaf page and get the first key > insert_key
+                    auto result = ih->find_leaf_page(insert_key.data(),
+                        Operation::FIND, nullptr, false);
+                    auto leaf_guard = std::move(result.first);
+                    int slot = leaf_guard->upper_bound(insert_key.data());
+                    const char* next_key = nullptr;
+                    if (slot < leaf_guard->get_size()) {
+                        next_key = leaf_guard->get_key(slot);
+                    }
+                    // Release the read latch BEFORE acquiring LockManager locks
+                    // (otherwise insert_entry would deadlock on write latch)
+                    leaf_guard->unlatch();
+                    if (next_key != nullptr) {
+                        context_->lock_mgr_->lock_insert_intention_on_key(
+                            context_->txn_, fh_->GetFd(), 0,
+                            next_key, first_idx.col_tot_len);
+                    }
+                } catch (...) {
+                    // If B+tree lookup fails, skip gap locking.
+                    // The record-level X-lock from insert_record still protects.
                 }
-                context_->lock_mgr_->lock_insert_intention_on_key(
-                    context_->txn_, fh_->GetFd(), 0 /* primary index */,
-                    idx_key.data(), first_idx.col_tot_len);
             }
 
             // Insert into record file

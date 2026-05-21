@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-RMDB Index-Key Gap Lock — Phantom Read Prevention Test
-=======================================================
-Validates the LockManager's index-key-based GAP / NEXT_KEY /
-INSERT_INTENTION lock infrastructure.
+RMDB Serializable Phantom Prevention — Next-Key Gap Lock Test
+==============================================================
+Validates that index-key-based GAP / NEXT_KEY / INSERT_INTENTION
+locks prevent phantom reads, including cross-key INSERT scenarios.
 
-Scenario A — NEXT_KEY blocks concurrent write on locked key:
-  T1: SELECT ... FOR UPDATE ON id=20  (acquires X + index-key GAP)
-  T2: SELECT ... FOR UPDATE ON id=20  →  BLOCKED by T1's lock
-  T1: COMMIT → T2 released ✓
+Scenario A — NEXT_KEY blocks concurrent write:
+  T1 locks id=20 (X + GAP). T2 tries same → BLOCKED → released on COMMIT.
 
-Scenario B — INSERT_INTENTION vs GAP on SAME key:
-  T1: acquires GAP on a specific index key
-  T2: tries INSERT_INTENTION on the SAME key → must BLOCK
-  (Demonstrates the compatibility matrix: GAP × INSERT_INTENTION → conflict)
+Scenario B — Cross-key phantom INSERT blocked by next-key routing:
+  T1: SELECT WHERE id > 10 FOR UPDATE → locks matched rows + guard gap
+  T2: INSERT id=15 → INSERT_INTENTION finds next-greater key (20) via B+tree
+      → collides with T1's GAP lock on key 20 → BLOCKED
+  T1: re-read → stable result
+  T1: COMMIT → T2 released, INSERT succeeds
 
 Usage:
   python3 tools/phantom_read_stress_test.py
@@ -61,7 +61,8 @@ def count_rows(resp):
 
 def main():
     print("=" * 60)
-    print("  RMDB Index-Key Gap Lock — Phantom Prevention Test")
+    print("  RMDB Serializable Phantom Prevention Test")
+    print("  Next-Key Gap Lock + B+tree Next-Key Routing")
     print("=" * 60)
 
     if not start_server():
@@ -69,7 +70,7 @@ def main():
 
     s = socket.socket(); s.settimeout(120)
     try: s.connect((HOST, PORT))
-    except: stop_server(); return False
+    except: return False
 
     passed = 0
     try:
@@ -82,9 +83,9 @@ def main():
         print("  Table pt: PRIMARY KEY(id), rows: id=10, id=20")
 
         # ============================================================
-        # Scenario A: NEXT_KEY blocks concurrent write on same key
+        # Scenario A: NEXT_KEY blocks concurrent FOR UPDATE
         # ============================================================
-        print("\n[Scenario A] NEXT_KEY (X + index-key GAP) blocks concurrent lock")
+        print("\n[Scenario A] NEXT_KEY blocks concurrent lock on same record")
         t1a = socket.socket(); t1a.settimeout(30); t1a.connect((HOST, PORT))
         t2a = socket.socket(); t2a.settimeout(30); t2a.connect((HOST, PORT))
 
@@ -113,62 +114,92 @@ def main():
         t1a.close(); t2a.close()
 
         # ============================================================
-        # Scenario B: Range scan stability
+        # Scenario B: Cross-key phantom INSERT blocked
         # ============================================================
-        print("\n[Scenario B] FOR UPDATE range scan serializes access")
+        print("\n[Scenario B] Cross-key phantom INSERT blocked by next-key routing")
         t1b = socket.socket(); t1b.settimeout(30); t1b.connect((HOST, PORT))
         t2b = socket.socket(); t2b.settimeout(30); t2b.connect((HOST, PORT))
 
         x(t1b, "begin")
-        resp_before = x(t1b, "SELECT * FROM pt WHERE id >= 10 FOR UPDATE")
+        resp_before = x(t1b, "SELECT * FROM pt WHERE id > 10 FOR UPDATE")
         rows_before = count_rows(resp_before)
-        print(f"  T1: locked range id>=10, got {rows_before} row(s)")
+        print(f"  T1: SELECT WHERE id>10 FOR UPDATE → {rows_before} row(s)")
 
-        t2b_done = threading.Event(); t2b_result = {}
+        # T2 tries INSERT id=15 — falls in gap (10, 20)
+        # INSERT_INTENTION routes to next-greater B+tree key (20)
+        # → collides with T1's GAP lock on key 20
+        t2b_done = threading.Event()
+        t2b_result = {}
         def t2b_fn():
             t0 = time.time()
-            r = x(t2b, "INSERT INTO pt VALUES(15, 150)")
+            resp = x(t2b, "INSERT INTO pt VALUES(15, 150)")
             t2b_result["ms"] = (time.time() - t0) * 1000
-            t2b_result["resp"] = r[:200]
+            t2b_result["resp"] = resp[:200]
             t2b_done.set()
+
         th_b = threading.Thread(target=t2b_fn); th_b.start()
-        time.sleep(1.0)
+        time.sleep(1.5)  # let T2 reach the lock manager and block
 
-        blocked = th_b.is_alive()
-        # Re-read while T2 may be blocked
-        resp_mid = x(t1b, "SELECT * FROM pt WHERE id >= 10")
-        rows_mid = count_rows(resp_mid)
-        stable = rows_mid == rows_before
+        blocked_b = th_b.is_alive()
+        if blocked_b:
+            print(f"  T2 INSERT id=15: BLOCKED ✓ (next-key routing hit GAP on 20)")
 
-        if blocked:
-            print(f"  T2 INSERT: BLOCKED by gap lock ✓")
+            # T1 re-reads: must see same row count (no phantom)
+            resp_mid = x(t1b, "SELECT * FROM pt WHERE id > 10")
+            rows_mid = count_rows(resp_mid)
+            stable = (rows_mid == rows_before)
+            print(f"  T1 re-read: {rows_mid} row(s) "
+                  f"({'stable ✓' if stable else 'PHANTOM ✗'})")
+
+            # T1 commits — T2 should wake up
+            x(t1b, "commit")
+            print("  T1: COMMIT")
+            t2b_done.wait(timeout=15)
+            elapsed = t2b_result["ms"]
+            print(f"  T2: INSERT completed in {elapsed:.0f}ms ✓")
             if stable: passed += 1
         else:
             t2b_done.wait(timeout=5)
-            print(f"  T2 INSERT: completed ({t2b_result['ms']:.0f}ms)")
-
-        print(f"  T1 re-read: {rows_mid} row(s) "
-              f"({'stable ✓' if stable else 'PHANTOM'})")
-        x(t1b, "commit")
+            elapsed = t2b_result["ms"]
+            if elapsed > 500:
+                print(f"  T2: blocked then released ({elapsed:.0f}ms)")
+                # Check if re-read was stable
+                resp_mid = x(t1b, "SELECT * FROM pt WHERE id > 10")
+                rows_mid = count_rows(resp_mid)
+                if rows_mid == rows_before:
+                    print("  T1 re-read: stable ✓")
+                    passed += 1
+                else:
+                    print(f"  T1 re-read: {rows_mid} row(s) (PHANTOM)")
+                x(t1b, "commit")
+            else:
+                print(f"  T2: completed immediately ({elapsed:.0f}ms)")
+                resp_mid = x(t1b, "SELECT * FROM pt WHERE id > 10")
+                rows_mid = count_rows(resp_mid)
+                if rows_mid != rows_before:
+                    print(f"  PHANTOM: {rows_before} → {rows_mid} rows")
+                x(t1b, "commit")
         t1b.close(); t2b.close()
 
-        # Verify final state
+        # Verify final state via the original setup connection
         resp_final = x(s, "SELECT * FROM pt ORDER BY id")
         rows_final = count_rows(resp_final)
         print(f"\n[Final] {rows_final} rows (expected 3)")
 
         # Summary
         print(f"\n{'=' * 60}")
-        print(f"  Scenario A (NEXT_KEY): {'PASS' if passed >= 1 else 'FAIL'}")
-        print(f"  Scenario B (range):    {'PASS' if passed >= 2 else 'CHECK'}")
-        print(f"  Lock infrastructure:   index-key LockDataId + GAP/NEXT_KEY/INSERT_INTENTION")
-        print(f"  Compatibility matrix:  8×9 covering all lock mode pairs")
+        print(f"  Scenario A (NEXT_KEY):     {'PASS' if passed >= 1 else 'FAIL'}")
+        print(f"  Scenario B (next-key INSERT): {'PASS' if passed >= 2 else 'CHECK'}")
+        print(f"  Result: {passed}/2 serializable isolation checks")
+        print(f"  LockDataId: index-key-based (fd, idx_id, key_bytes, GAP)")
+        print(f"  INSERT routing: B+tree upper_bound → next-key lock target")
         print(f"{'=' * 60}")
         return passed >= 1
 
     finally:
         s.close()
-        subprocess.run(["rm", "-rf", DB], capture_output=True)
+        # Note: server holds file descriptors to DB; deleting while
+        # running may cause data loss. Cleaned up by start_server().
 
 
 if __name__ == "__main__":
