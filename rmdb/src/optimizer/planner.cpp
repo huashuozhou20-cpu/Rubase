@@ -28,11 +28,18 @@ See the Mulan PSL v2 for more details. */
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names) {
     index_col_names.clear();
     for(auto& cond: curr_conds) {
-        if(cond.is_rhs_val && cond.op == OP_EQ && cond.lhs_col.tab_name.compare(tab_name) == 0)
-            index_col_names.push_back(cond.lhs_col.col_name);
+        if(cond.lhs_col.tab_name.compare(tab_name) == 0) {
+            // Match OP_EQ (value lookup) or OP_IS_NULL / OP_IS_NOT_NULL
+            if ((cond.is_rhs_val && cond.op == OP_EQ) ||
+                cond.op == OP_IS_NULL || cond.op == OP_IS_NOT_NULL) {
+                index_col_names.push_back(cond.lhs_col.col_name);
+            }
+        }
     }
+    if (index_col_names.empty()) return false;
     TabMeta& tab = sm_manager_->db_.get_table(tab_name);
     if(tab.is_index(index_col_names)) return true;
+    index_col_names.clear();
     return false;
 }
 
@@ -257,7 +264,7 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
     for (size_t i = 0; i < tables.size(); i++) {
         auto curr_conds = pop_conds(query->conds, tables[i]);
         std::vector<std::string> index_col_names;
-        // Always use SeqScan for correctness (IndexScan has known issues with PK index)
+        // Use SeqScan for correctness (IndexScan has known issues)
         index_col_names.clear();
         table_scan_executors[i] =
             std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);

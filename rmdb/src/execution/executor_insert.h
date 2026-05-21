@@ -130,6 +130,34 @@ class InsertExecutor : public AbstractExecutor {
                     }
                 }
             }
+            // Eager unique constraint check: probe the primary index BEFORE inserting.
+            // If the key already exists, reject immediately.
+            if (!tab_.indexes.empty()) {
+                auto& pk_idx = tab_.indexes[0];
+                std::vector<char> pk_key(pk_idx.col_tot_len);
+                int off = 0;
+                for (const auto& col : pk_idx.cols) {
+                    memcpy(pk_key.data() + off, rec.data + col.offset, col.len);
+                    off += col.len;
+                }
+                auto ih = sm_manager_->ihs_.at(
+                    sm_manager_->get_ix_manager()->get_index_name(
+                        tab_name_, pk_idx.cols)).get();
+                // Use find_leaf_page + leaf_lookup directly so we can unlatch
+                bool found = false;
+                {
+                    auto result = ih->find_leaf_page(pk_key.data(),
+                        Operation::FIND, nullptr, false);
+                    auto leaf = std::move(result.first);
+                    Rid* rid;
+                    found = leaf->leaf_lookup(pk_key.data(), &rid);
+                    leaf->unlatch();  // release read latch before insert
+                }
+                if (found) {
+                    throw RMDBError("Duplicate key error: primary key already exists");
+                }
+            }
+
             // Acquire INSERT_INTENTION on the NEXT key BEFORE inserting.
             // We use B+tree to find the next-greater index key, then place
             // INSERT_INTENTION on THAT key's LockDataId. This collides with
