@@ -30,8 +30,9 @@ SERVER = os.path.join(BUILD_DIR, "bin", "rmdb")
 DB = "/tmp/rmdb_wal_undo"
 
 
-def start_fresh():
-    subprocess.run(["rm", "-rf", DB], capture_output=True)
+def start_fresh(delete=True):
+    if delete:
+        subprocess.run(["rm", "-rf", DB], capture_output=True)
     return subprocess.Popen([SERVER, DB], cwd=BUILD_DIR,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -121,7 +122,7 @@ def main():
 
         # Phase 5: Restart + WAL recovery
         print("\n[Phase 5] Restart + WAL recovery...")
-        p2 = start_fresh()
+        p2 = start_fresh(delete=False)  # DON'T delete — we need the WAL log!
         if not wait_server():
             print("FAIL: Server won't restart"); return False
 

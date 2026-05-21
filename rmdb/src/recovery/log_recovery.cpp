@@ -48,7 +48,21 @@ void RecoveryManager::undo_txn(txn_id_t txn_id, lsn_t start_lsn) {
             if (it != sm_manager_->fhs_.end()) {
                 auto* fh = it->second.get();
                 if (log_rec.rid_.page_no < fh->get_file_hdr().num_pages) {
-                    fh->delete_record(log_rec.rid_, nullptr);
+                    // Idempotent undo: verify the record at this slot actually
+                    // belongs to the transaction being undone. If the slot was
+                    // reused by a committed transaction (T2), skip it.
+                    auto rec_at_slot = fh->get_record_snapshot(log_rec.rid_);
+                    if (rec_at_slot) {
+                        txn_id_t slot_txn;
+                        memcpy(&slot_txn, rec_at_slot->data + trx_id_offset(rec_at_slot->size),
+                               sizeof(txn_id_t));
+                        // Only delete if the record's txn_id matches the undone txn
+                        if (slot_txn == txn_id) {
+                            fh->delete_record(log_rec.rid_, nullptr);
+                        }
+                    } else {
+                        fh->delete_record(log_rec.rid_, nullptr);
+                    }
                 }
             }
         } else if (log_type == LogType::DELETE) {
@@ -57,12 +71,15 @@ void RecoveryManager::undo_txn(txn_id_t txn_id, lsn_t start_lsn) {
             auto it = sm_manager_->fhs_.find(std::string(log_rec.table_name_, log_rec.table_name_size_));
             if (it != sm_manager_->fhs_.end()) {
                 auto* fh = it->second.get();
-                // Ensure target page exists before re-inserting (undo of delete)
                 while (fh->get_file_hdr().num_pages <= log_rec.rid_.page_no) {
                     RmPageHandle ph = fh->create_new_page_handle();
                     buffer_pool_manager_->unpin_page(ph.page->get_page_id(), true);
                 }
-                fh->insert_record(log_rec.rid_, log_rec.delete_value_.data);
+                // Only re-insert if the slot is empty (idempotent undo)
+                auto existing = fh->get_record_snapshot(log_rec.rid_);
+                if (!existing) {
+                    fh->insert_record(log_rec.rid_, log_rec.delete_value_.data);
+                }
             }
         } else if (log_type == LogType::UPDATE) {
             UpdateLogRecord log_rec;
@@ -71,7 +88,19 @@ void RecoveryManager::undo_txn(txn_id_t txn_id, lsn_t start_lsn) {
             if (it != sm_manager_->fhs_.end()) {
                 auto* fh = it->second.get();
                 if (log_rec.rid_.page_no < fh->get_file_hdr().num_pages) {
-                    fh->update_record(log_rec.rid_, log_rec.old_value_.data, nullptr);
+                    // Idempotent undo: only restore old value if current record
+                    // belongs to the transaction being undone
+                    auto rec_at_slot = fh->get_record_snapshot(log_rec.rid_);
+                    if (rec_at_slot) {
+                        txn_id_t slot_txn;
+                        memcpy(&slot_txn, rec_at_slot->data + trx_id_offset(rec_at_slot->size),
+                               sizeof(txn_id_t));
+                        if (slot_txn == txn_id) {
+                            fh->update_record(log_rec.rid_, log_rec.old_value_.data, nullptr);
+                        }
+                    } else {
+                        fh->update_record(log_rec.rid_, log_rec.old_value_.data, nullptr);
+                    }
                 }
             }
         }
@@ -136,87 +165,57 @@ void RecoveryManager::analyze() {
  * @description: 重做所有未落盘的操作（仅重做DPT中脏页上的操作）
  */
 void RecoveryManager::redo() {
+    // Repeating History: replay ALL log records from beginning to end.
+    // We unconditionally redo every INSERT/DELETE/UPDATE to restore the
+    // physical state to exactly what it was at crash time (including
+    // both committed T2 and uncommitted T1 data). The undo phase will
+    // remove T1's uncommitted data afterwards.
+    //
+    // Previously, a DPT (Dirty Page Table) filter was used that skipped
+    // operations on pages not in the DPT, causing committed data on
+    // flushed pages to be lost after recovery.
     if (log_data_ == nullptr) return;
 
-    // 构建脏页集合，用于快速判断是否需要redo
-    std::unordered_set<page_id_t> dirty_pages;
-    lsn_t min_dirty_lsn = INVALID_LSN;
-    for (auto &entry : dpt_) {
-        dirty_pages.insert(entry.first);
-        for (auto &lsn : entry.second) {
-            if (min_dirty_lsn == INVALID_LSN || lsn < min_dirty_lsn) {
-                min_dirty_lsn = lsn;
-            }
-        }
-    }
-    // 无脏页则无需重做
-    if (dirty_pages.empty()) return;
-
-    // 从最小脏页LSN开始扫描，跳过已落盘的日志记录
-    int start_offset = 0;
-    if (min_dirty_lsn != INVALID_LSN) {
-        auto it = lsn_to_offset_.find(min_dirty_lsn);
-        if (it != lsn_to_offset_.end()) start_offset = it->second;
-    }
-
-    int offset = start_offset;
+    int offset = 0;
     while (offset < log_size_) {
         const char* rec = log_data_ + offset;
         LogType log_type = *reinterpret_cast<const LogType*>(rec + OFFSET_LOG_TYPE);
         uint32_t log_tot_len = *reinterpret_cast<const uint32_t*>(rec + OFFSET_LOG_TOT_LEN);
 
-        bool should_redo = true;
-        // 对数据操作类日志，检查其所在页是否在DPT中
-        if (log_type == LogType::INSERT || log_type == LogType::DELETE || log_type == LogType::UPDATE) {
-            // 从序列化的日志记录中提取RID
-            int rec_size = *reinterpret_cast<const int*>(rec + OFFSET_LOG_DATA);
-            int rid_offset = OFFSET_LOG_DATA + sizeof(int) + rec_size;
-            if (log_type == LogType::UPDATE) {
-                int new_rec_size = *reinterpret_cast<const int*>(rec + rid_offset);
-                rid_offset += sizeof(int) + new_rec_size;
+        if (log_type == LogType::INSERT) {
+            InsertLogRecord log_rec;
+            log_rec.deserialize(rec);
+            std::string table_name(log_rec.table_name_, log_rec.table_name_size_);
+            auto it = sm_manager_->fhs_.find(table_name);
+            if (it != sm_manager_->fhs_.end()) {
+                auto* fh = it->second.get();
+                // Ensure target page exists (may not exist if never flushed before crash)
+                while (fh->get_file_hdr().num_pages <= log_rec.rid_.page_no) {
+                    RmPageHandle ph = fh->create_new_page_handle();
+                    buffer_pool_manager_->unpin_page(ph.page->get_page_id(), true);
+                }
+                fh->insert_record(log_rec.rid_, log_rec.insert_value_.data);
             }
-            const Rid* rid = reinterpret_cast<const Rid*>(rec + rid_offset);
-            should_redo = dirty_pages.count(rid->page_no) > 0;
-        }
-
-        if (should_redo) {
-            if (log_type == LogType::INSERT) {
-                InsertLogRecord log_rec;
-                log_rec.deserialize(rec);
-                std::string table_name(log_rec.table_name_, log_rec.table_name_size_);
-                auto it = sm_manager_->fhs_.find(table_name);
-                if (it != sm_manager_->fhs_.end()) {
-                    auto* fh = it->second.get();
-                    // Ensure target page exists (may not exist if never flushed before crash)
-                    while (fh->get_file_hdr().num_pages <= log_rec.rid_.page_no) {
-                        RmPageHandle ph = fh->create_new_page_handle();
-                        buffer_pool_manager_->unpin_page(ph.page->get_page_id(), true);
-                    }
-                    fh->insert_record(log_rec.rid_, log_rec.insert_value_.data);
+        } else if (log_type == LogType::DELETE) {
+            DeleteLogRecord log_rec;
+            log_rec.deserialize(rec);
+            std::string table_name(log_rec.table_name_, log_rec.table_name_size_);
+            auto it = sm_manager_->fhs_.find(table_name);
+            if (it != sm_manager_->fhs_.end()) {
+                auto* fh = it->second.get();
+                if (log_rec.rid_.page_no < fh->get_file_hdr().num_pages) {
+                    fh->delete_record(log_rec.rid_, nullptr);
                 }
-            } else if (log_type == LogType::DELETE) {
-                DeleteLogRecord log_rec;
-                log_rec.deserialize(rec);
-                std::string table_name(log_rec.table_name_, log_rec.table_name_size_);
-                auto it = sm_manager_->fhs_.find(table_name);
-                if (it != sm_manager_->fhs_.end()) {
-                    auto* fh = it->second.get();
-                    // Skip if page never flushed (no redo needed)
-                    if (log_rec.rid_.page_no < fh->get_file_hdr().num_pages) {
-                        fh->delete_record(log_rec.rid_, nullptr);
-                    }
-                }
-            } else if (log_type == LogType::UPDATE) {
-                UpdateLogRecord log_rec;
-                log_rec.deserialize(rec);
-                std::string table_name(log_rec.table_name_, log_rec.table_name_size_);
-                auto it = sm_manager_->fhs_.find(table_name);
-                if (it != sm_manager_->fhs_.end()) {
-                    auto* fh = it->second.get();
-                    // Skip if page never flushed (no redo needed)
-                    if (log_rec.rid_.page_no < fh->get_file_hdr().num_pages) {
-                        fh->update_record(log_rec.rid_, log_rec.new_value_.data, nullptr);
-                    }
+            }
+        } else if (log_type == LogType::UPDATE) {
+            UpdateLogRecord log_rec;
+            log_rec.deserialize(rec);
+            std::string table_name(log_rec.table_name_, log_rec.table_name_size_);
+            auto it = sm_manager_->fhs_.find(table_name);
+            if (it != sm_manager_->fhs_.end()) {
+                auto* fh = it->second.get();
+                if (log_rec.rid_.page_no < fh->get_file_hdr().num_pages) {
+                    fh->update_record(log_rec.rid_, log_rec.new_value_.data, nullptr);
                 }
             }
         }
