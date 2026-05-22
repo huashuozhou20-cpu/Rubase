@@ -554,6 +554,11 @@ int main(int argc, char **argv) {
         recovery->redo();
         recovery->undo();
 
+        // Rebuild B+tree indexes from the recovered record files.
+        // Index operations are not WAL-logged, so after ARIES recovery
+        // the indexes are stale.  This scan re-populates them.
+        recovery->rebuild_indexes();
+
         // Align LogManager's global LSN past the last recovery-visible LSN
         // so new log records don't collide with existing WAL entries.
         if (recovery->max_lsn() != INVALID_LSN) {

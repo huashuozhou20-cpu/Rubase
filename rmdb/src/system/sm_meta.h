@@ -185,6 +185,8 @@ class DbMeta {
 
     /* 判断数据库中是否存在指定名称的表 */
     bool is_table(const std::string &tab_name) const { return tabs_.find(tab_name) != tabs_.end(); }
+    auto& tables() { return tabs_; }
+    const auto& tables() const { return tabs_; }
 
     bool is_view(const std::string &name) const { return views_.find(name) != views_.end(); }
 

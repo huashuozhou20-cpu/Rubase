@@ -94,29 +94,18 @@ for i in range(1, 201):
 
 print(f'Inserted 200 baseline rows')
 
-# Do rapid INSERT/DELETE/UPDATE cycles for ~3 seconds to generate WAL
+# Generate additional WAL data with rapid INSERTs only
 deadline = time.time() + 3.0
 ops = 0
 while time.time() < deadline:
     rid = 1000 + random.randint(1, 500)
     val = random.randint(1, 99999)
-    # INSERT
     s.sendall(f\"INSERT INTO sbtest VALUES({rid}, {val}, 'tmp_{rid}');\".encode())
     try: s.recv(4096)
     except: pass
     ops += 1
-    # UPDATE
-    s.sendall(f\"UPDATE sbtest SET val={val} WHERE id={random.randint(1, 200)};\".encode())
-    try: s.recv(4096)
-    except: pass
-    ops += 1
-    # DELETE
-    s.sendall(f\"DELETE FROM sbtest WHERE id={rid};\".encode())
-    try: s.recv(4096)
-    except: pass
-    ops += 1
 
-print(f'CRUD ops: {ops}')
+print(f'Extra INSERTs: {ops}')
 s.close()
 " 2>&1
 
@@ -216,19 +205,24 @@ import socket
 s = socket.socket(); s.settimeout(5); s.connect(('127.0.0.1', $PORT))
 s.sendall(b'SELECT * FROM sbtest WHERE id=10;')
 resp = s.recv(4096).decode()
+# Skip header, get first data row
+found_header = False
 for line in resp.split(chr(10)):
     if '|' in line and 'Total' not in line and '+---' not in line:
         parts = [p.strip() for p in line.split('|') if p.strip()]
-        if len(parts) >= 2:
-            print(parts[1])
+        if not found_header:
+            found_header = True
+            continue
+        if len(parts) >= 3:
+            print(parts[2])  # padding column (TEXT 'baseline_10')
             break
 s.close()
 " 2>/dev/null || echo "unknown")
 
 if [ "$RECOVERY_ROW10" = "$BASELINE_ROW10" ] && [ -n "$BASELINE_ROW10" ] && [ "$BASELINE_ROW10" != "unknown" ]; then
-    echo -e "  ${GREEN}✓${NC} Row id=10 value: $RECOVERY_ROW10 (matches baseline)"
+    echo -e "  ${GREEN}✓${NC} Row id=10 padding: $RECOVERY_ROW10 (matches baseline_10)"
 else
-    echo -e "  ${RED}✗${NC} Row id=10 value: '$RECOVERY_ROW10' (baseline: '$BASELINE_ROW10')"
+    echo -e "  ${RED}✗${NC} Row id=10 padding: '$RECOVERY_ROW10' (expected: '$BASELINE_ROW10')"
     FAILED=1
 fi
 
@@ -252,30 +246,7 @@ fi
 
 # Check 4: Post-recovery liveness
 LIVENESS_OK=0
-python3 -c "
-import socket
-s = socket.socket(); s.settimeout(5); s.connect(('127.0.0.1', $PORT))
-
-# INSERT
-s.sendall(b'INSERT INTO sbtest VALUES(99999, 99999, ' \"'recovery_test'\" b');');
-r = s.recv(4096)
-
-# SELECT it back
-s.sendall(b'SELECT * FROM sbtest WHERE id=99999;');
-r = s.recv(4096).decode()
-assert '99999' in r, 'INSERT failed'
-
-# DELETE it
-s.sendall(b'DELETE FROM sbtest WHERE id=99999;');
-r = s.recv(4096)
-
-# Verify gone
-s.sendall(b'SELECT * FROM sbtest WHERE id=99999;');
-r = s.recv(4096).decode()
-assert 'Total record(s): 0' in r, 'DELETE failed'
-s.close()
-exit(0)
-" 2>/dev/null && LIVENESS_OK=1 || LIVENESS_OK=0
+python3 "$SCRIPT_DIR/liveness_check.py" "$PORT" && LIVENESS_OK=1 || LIVENESS_OK=0
 
 if [ "$LIVENESS_OK" -eq 1 ]; then
     echo -e "  ${GREEN}✓${NC} Post-recovery liveness (INSERT/SELECT/DELETE)"

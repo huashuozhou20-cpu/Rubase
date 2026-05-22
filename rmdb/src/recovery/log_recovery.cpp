@@ -309,3 +309,79 @@ void RecoveryManager::undo() {
     // original log records.  The log_manager appends new records after the
     // last valid LSN, so old records don't interfere.
 }
+
+/**
+ * @description: Rebuild all B+tree indexes from the recovered record files.
+ *               Because index operations are not WAL-logged, the indexes are
+ *               stale after ARIES recovery.  We drop every index, recreate
+ *               it, and re-insert every record from the recovered data file.
+ */
+void RecoveryManager::rebuild_indexes() {
+    auto* ix_mgr = sm_manager_->get_ix_manager();
+    auto& db = sm_manager_->db_;
+
+    for (auto& tab_entry : db.tables()) {
+        auto& tab = tab_entry.second;
+        std::string tab_name = tab.name;
+
+        // Skip tables that have no open record file handle
+        auto fh_it = sm_manager_->fhs_.find(tab_name);
+        if (fh_it == sm_manager_->fhs_.end()) continue;
+        auto* fh = fh_it->second.get();
+
+        // ---- Phase 1: drop and recreate every index on this table ---------
+        for (auto& index : tab.indexes) {
+            auto ix_name = ix_mgr->get_index_name(tab_name, index.cols);
+
+            // Close the stale index handle
+            auto ih_it = sm_manager_->ihs_.find(ix_name);
+            if (ih_it != sm_manager_->ihs_.end()) {
+                ix_mgr->close_index(ih_it->second.get());
+                sm_manager_->ihs_.erase(ih_it);
+            }
+
+            // Destroy the stale index file on disk
+            if (ix_mgr->exists(tab_name, index.cols)) {
+                ix_mgr->destroy_index(tab_name, index.cols);
+            }
+
+            // Create a brand-new empty index
+            ix_mgr->create_index(tab_name, index.cols);
+
+            // Open the fresh index and store the handle
+            auto ih = ix_mgr->open_index(tab_name, index.cols);
+            sm_manager_->ihs_.emplace(ix_name, std::move(ih));
+        }
+
+        // ---- Phase 2: scan the recovered record file and re-insert -------
+        RmScan scan(fh);
+        int col_tot_len = 0;
+        for (auto& col : tab.cols) col_tot_len += col.len;
+
+        int count = 0;
+        while (!scan.is_end()) {
+            auto rec = fh->get_record(scan.rid(), nullptr);
+            if (!rec) { scan.next(); continue; }
+
+            // For each index, extract the key and insert
+            for (auto& index : tab.indexes) {
+                auto ix_name = ix_mgr->get_index_name(tab_name, index.cols);
+                auto ih_it = sm_manager_->ihs_.find(ix_name);
+                if (ih_it == sm_manager_->ihs_.end()) continue;
+                auto* ih = ih_it->second.get();
+
+                char* key = new char[index.col_tot_len];
+                int offset = 0;
+                for (auto& col : index.cols) {
+                    memcpy(key + offset, rec->data + col.offset, col.len);
+                    offset += col.len;
+                }
+                ih->insert_entry(key, scan.rid(), nullptr);
+                delete[] key;
+            }
+
+            count++;
+            scan.next();
+        }
+    }
+}

@@ -16,6 +16,8 @@ See the Mulan PSL v2 for more details. */
 #include "log_manager.h"
 #include "storage/disk_manager.h"
 #include "system/sm_manager.h"
+#include "index/ix.h"
+#include "record/rm_scan.h"
 
 class RedoLogsInPage {
 public:
@@ -35,6 +37,7 @@ public:
     void analyze();
     void redo();
     void undo();
+    void rebuild_indexes();
 
     // Return the highest LSN seen during analyze, or INVALID_LSN.
     lsn_t max_lsn() const { return max_lsn_; }
