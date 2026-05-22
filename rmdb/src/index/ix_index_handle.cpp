@@ -245,11 +245,14 @@ NodeHandleGuard IxIndexHandle::split(IxNodeHandle *node) {
 
     int total = node->get_size();
     int mid = total / 2;
-    int n_right = total - mid;
-    new_node->insert_pairs(0, node->get_key(mid), node->get_rid(mid), n_right);
-    node->set_size(mid);
 
     if (node->is_leaf_page()) {
+        // Leaf: right half starts at mid. The first key of the right leaf
+        // (original key[mid]) becomes the separator pushed up to the parent.
+        int n_right = total - mid;
+        new_node->insert_pairs(0, node->get_key(mid), node->get_rid(mid), n_right);
+        node->set_size(mid);
+
         new_node->set_next_leaf(node->get_next_leaf());
         new_node->set_prev_leaf(node->get_page_no());
         node->set_next_leaf(new_node->get_page_no());
@@ -262,7 +265,23 @@ NodeHandleGuard IxIndexHandle::split(IxNodeHandle *node) {
             file_hdr_->last_leaf_ = new_node->get_page_no();
         }
     } else {
-        for (int i = 0; i < new_node->get_size(); i++) {
+        // Internal node: key at position 'mid' is the separator — it is NOT
+        // kept in either half. It is pushed up to the parent by the caller.
+        //   Left:  keys[0..mid-1]        rids[0..mid]
+        //   Right: keys[mid+1..total-1]  rids[mid+1..total]
+        int n_right_keys = total - mid - 1;  // keys in the right half
+        if (n_right_keys > 0) {
+            new_node->insert_pairs(0, node->get_key(mid + 1),
+                                   node->get_rid(mid + 1), n_right_keys);
+        }
+        // The right half must also inherit the last child pointer (rids[total]).
+        new_node->set_rid(n_right_keys, *node->get_rid(total));
+        new_node->set_size(n_right_keys);
+        node->set_size(mid);
+
+        // Update child→parent links for all children in the right half
+        // (n_right_keys keys → n_right_keys + 1 children).
+        for (int i = 0; i <= n_right_keys; i++) {
             maintain_child(new_node.get(), i);
         }
     }
@@ -306,12 +325,30 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
     PageLatchGuard parent_latch(parent->page, true);
     int child_idx = parent->find_child(old_node);
     Rid rid = {.page_no = new_node->get_page_no(), .slot_no = 0};
-    parent->insert_pair(child_idx + 1, key, rid);
+
+    // child_idx can be parent->get_size() for internal nodes (rightmost child,
+    // which is at rids[num_key] — one past the key array).
+    if (child_idx == parent->get_size()) {
+        // Rightmost child: rids[child_idx] already points to old_node.
+        // Append the separator key and new child at the end.
+        parent->set_key(child_idx, key);
+        parent->set_rid(child_idx + 1, rid);
+        parent->set_size(parent->get_size() + 1);
+    } else {
+        parent->insert_pair(child_idx + 1, key, rid);
+    }
     new_node->set_parent_page_no(parent->get_page_no());
 
     if (parent->get_size() > parent->get_max_size()) {
+        // Save the separator key before split — for internal nodes,
+        // the key at position total/2 is removed from both halves and
+        // must be pushed up to the grandparent.
+        int sep_idx = parent->get_size() / 2;
+        char *sep_key = new char[file_hdr_->col_tot_len_];
+        memcpy(sep_key, parent->get_key(sep_idx), file_hdr_->col_tot_len_);
         auto new_parent = split(parent.get());
-        insert_into_parent(parent.get(), new_parent->get_key(0), new_parent.get(), transaction);
+        insert_into_parent(parent.get(), sep_key, new_parent.get(), transaction);
+        delete[] sep_key;
         new_parent.set_dirty(true);
     }
 
@@ -370,9 +407,14 @@ bool IxIndexHandle::delete_entry(const char *key, Transaction *transaction) {
         return false;
     }
 
-    bool node_should_delete = coalesce_or_redistribute(leaf.get(), transaction, nullptr);
+    bool node_consumed = coalesce_or_redistribute(leaf.get(), transaction, nullptr);
 
-    if (!node_should_delete) {
+    if (node_consumed) {
+        // Node was consumed by coalesce or root adjustment — cleanup
+        // (unpin + delete) was already handled internally.  Disarm
+        // the guard to prevent a double-free.
+        leaf.release();
+    } else {
         leaf.set_dirty(true);
     }
 
@@ -411,7 +453,7 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle *node, Transaction *tr
         parent.set_dirty(true);
         neighbor.set_dirty(true);
         // both latches auto-released by guards on return
-        return false;
+        return false;  // node still valid, caller retains ownership
     }
 
     // coalesce: extract raw pointers since coalesce may swap them.
@@ -421,13 +463,14 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle *node, Transaction *tr
     neighbor_latch.disarm();
     parent_latch.disarm();
     bool parent_should_delete = coalesce(raw_neighbor, node, raw_parent, index, transaction, root_is_latched);
-    // after coalesce: right node merged into left (neighbor), right deleted
-    // raw_neighbor and node may have been swapped by coalesce if index==0
+    // After coalesce the caller's node has been merged into the survivor —
+    // its data is gone and its page may be recycled.  The caller MUST disarm
+    // its guard and not touch the node.
     raw_neighbor->page->wunlock();
     raw_parent->page->wunlock();
     destroy_node(raw_neighbor, true);
     destroy_node(raw_parent, true);
-    return parent_should_delete;
+    return true;  // caller's node was consumed by coalesce
 }
 
 /**
@@ -444,11 +487,13 @@ bool IxIndexHandle::adjust_root(IxNodeHandle *old_root_node) {
         update_root_page_no(child_page_no);
         child.set_dirty(true);
         decrement_page_count();
+        destroy_node(old_root_node, false);  // unpin + delete old root
         return true;
     }
     if (old_root_node->is_leaf_page() && old_root_node->get_size() == 0) {
         update_root_page_no(IX_NO_PAGE);
         decrement_page_count();
+        destroy_node(old_root_node, false);  // unpin + delete empty root
         return true;
     }
     return false;

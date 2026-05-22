@@ -145,18 +145,21 @@ class IxNodeHandle {
     }
 
     /**
-     * @brief 由parent调用，寻找child，返回child在parent中的rid_idx∈[0,page_hdr->num_key)
+     * @brief 由parent调用，寻找child，返回child在parent中的rid_idx
+     *        Internal nodes: rid_idx ∈ [0, page_hdr->num_key]  (num_key+1 children)
+     *        Leaf nodes:     rid_idx ∈ [0, page_hdr->num_key)  (num_key children)
      * @param child
      * @return int
      */
     int find_child(IxNodeHandle *child) {
+        int limit = page_hdr->is_leaf ? page_hdr->num_key : page_hdr->num_key + 1;
         int rid_idx;
-        for (rid_idx = 0; rid_idx < page_hdr->num_key; rid_idx++) {
+        for (rid_idx = 0; rid_idx < limit; rid_idx++) {
             if (get_rid(rid_idx)->page_no == child->get_page_no()) {
                 break;
             }
         }
-        assert(rid_idx < page_hdr->num_key);
+        assert(rid_idx < limit);
         return rid_idx;
     }
 };
@@ -249,6 +252,8 @@ class IxIndexHandle {
     // for delete
     bool delete_entry(const char *key, Transaction *transaction);
 
+    // Returns true if the caller's node was consumed (merged / root-adjusted).
+    // The caller must disarm its guard — cleanup was already handled internally.
     bool coalesce_or_redistribute(IxNodeHandle *node, Transaction *transaction = nullptr,
                                 bool *root_is_latched = nullptr);
     bool adjust_root(IxNodeHandle *old_root_node);

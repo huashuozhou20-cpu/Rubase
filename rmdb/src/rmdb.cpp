@@ -26,7 +26,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_abstract.h"
 
 #define DEFAULT_PORT 8765
-#define MAX_CONN_LIMIT 8
+#define MAX_CONN_LIMIT 128
 
 static bool should_exit = false;
 static std::atomic<int> active_connections{0};
@@ -179,6 +179,7 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
 
 void *client_handler(void *sock_fd) {
     int fd = *((int *)sock_fd);
+    delete (int *)sock_fd;  // heap-allocated by accept loop
     pthread_mutex_unlock(sockfd_mutex);
 
     active_connections.fetch_add(1);
@@ -476,6 +477,7 @@ void start_server(int port) {
         int sockfd = accept(sockfd_server, (struct sockaddr *)(&s_addr_client), (socklen_t *)(&client_length));
         if (sockfd == -1) {
             std::cout << "Accept error!" << std::endl;
+            pthread_mutex_unlock(sockfd_mutex);
             continue;  // ignore current socket ,continue while loop.
         }
 
@@ -491,9 +493,14 @@ void start_server(int port) {
             continue;
         }
 
-        // 和客户端建立连接，并开启一个线程负责处理客户端请求
-        if (pthread_create(&thread_id, nullptr, &client_handler, (void *)(&sockfd)) != 0) {
+        // Heap-allocate to prevent stack-use-after-scope: the worker thread
+        // reads *sockfd_ptr then deletes it.
+        int *sockfd_ptr = new int(sockfd);
+        if (pthread_create(&thread_id, nullptr, &client_handler, (void *)sockfd_ptr) != 0) {
             std::cout << "Create thread fail!" << std::endl;
+            delete sockfd_ptr;
+            close(sockfd);
+            pthread_mutex_unlock(sockfd_mutex);
             break;  // break while loop
         }
 
