@@ -554,6 +554,12 @@ int main(int argc, char **argv) {
         recovery->redo();
         recovery->undo();
 
+        // Align LogManager's global LSN past the last recovery-visible LSN
+        // so new log records don't collide with existing WAL entries.
+        if (recovery->max_lsn() != INVALID_LSN) {
+            log_manager->set_global_lsn(recovery->max_lsn() + 1);
+        }
+
         // 开启服务端，开始接受客户端连接
         start_server(port);
     } catch (RMDBError &e) {

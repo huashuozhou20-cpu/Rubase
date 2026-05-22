@@ -35,6 +35,9 @@ public:
     void analyze();
     void redo();
     void undo();
+
+    // Return the highest LSN seen during analyze, or INVALID_LSN.
+    lsn_t max_lsn() const { return max_lsn_; }
 private:
     LogBuffer buffer_;                                              // 读入日志
     DiskManager* disk_manager_;                                     // 用来读写文件
@@ -44,6 +47,8 @@ private:
     // Recovery state
     char* log_data_ = nullptr;
     int log_size_ = 0;
+    lsn_t max_lsn_ = INVALID_LSN;                                   // Highest LSN in log (for LogManager alignment)
+
     std::unordered_set<txn_id_t> att_;                              // Active Transaction Table
     std::unordered_map<txn_id_t, lsn_t> txn_last_lsn_;             // Last LSN for each txn
     std::unordered_map<lsn_t, int> lsn_to_offset_;                 // LSN → offset in log_data_

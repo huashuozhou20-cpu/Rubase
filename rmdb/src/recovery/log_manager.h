@@ -388,6 +388,11 @@ public:
     void flush_log_to_disk();
     void wait_for_persist_lsn(lsn_t target);
 
+    // Align global_lsn_ after recovery so new log records continue past
+    // the last recovery-visible LSN without collision.
+    void set_global_lsn(lsn_t lsn) { global_lsn_ = lsn; }
+    lsn_t get_global_lsn() const { return global_lsn_; }
+
     LogBuffer* get_log_buffer() { return &log_buffer_; }
 
     void start_flush_thread();

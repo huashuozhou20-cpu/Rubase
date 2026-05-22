@@ -120,12 +120,14 @@ void RecoveryManager::analyze() {
     txn_last_lsn_.clear();
     lsn_to_offset_.clear();
     dpt_.clear();
+    max_lsn_ = INVALID_LSN;
 
     int offset = 0;
     while (offset < log_size_) {
         const char* rec = log_data_ + offset;
         LogType log_type = *reinterpret_cast<const LogType*>(rec + OFFSET_LOG_TYPE);
         lsn_t lsn = *reinterpret_cast<const lsn_t*>(rec + OFFSET_LSN);
+        if (lsn > max_lsn_) max_lsn_ = lsn;
         uint32_t log_tot_len = *reinterpret_cast<const uint32_t*>(rec + OFFSET_LOG_TOT_LEN);
         txn_id_t log_tid = *reinterpret_cast<const txn_id_t*>(rec + OFFSET_LOG_TID);
 
@@ -162,24 +164,19 @@ void RecoveryManager::analyze() {
 }
 
 /**
- * @description: 重做所有未落盘的操作（仅重做DPT中脏页上的操作）
+ * @description: 重做所有未落盘的操作 — with page-LSN idempotence barrier.
+ *               If a page already has LSN >= log record LSN, the change was
+ *               already applied (by a previous recovery attempt that crashed
+ *               mid-redo).  Skip it to avoid double-apply corruption.
  */
 void RecoveryManager::redo() {
-    // Repeating History: replay ALL log records from beginning to end.
-    // We unconditionally redo every INSERT/DELETE/UPDATE to restore the
-    // physical state to exactly what it was at crash time (including
-    // both committed T2 and uncommitted T1 data). The undo phase will
-    // remove T1's uncommitted data afterwards.
-    //
-    // Previously, a DPT (Dirty Page Table) filter was used that skipped
-    // operations on pages not in the DPT, causing committed data on
-    // flushed pages to be lost after recovery.
     if (log_data_ == nullptr) return;
 
     int offset = 0;
     while (offset < log_size_) {
         const char* rec = log_data_ + offset;
         LogType log_type = *reinterpret_cast<const LogType*>(rec + OFFSET_LOG_TYPE);
+        lsn_t lsn = *reinterpret_cast<const lsn_t*>(rec + OFFSET_LSN);
         uint32_t log_tot_len = *reinterpret_cast<const uint32_t*>(rec + OFFSET_LOG_TOT_LEN);
 
         if (log_type == LogType::INSERT) {
@@ -189,12 +186,26 @@ void RecoveryManager::redo() {
             auto it = sm_manager_->fhs_.find(table_name);
             if (it != sm_manager_->fhs_.end()) {
                 auto* fh = it->second.get();
-                // Ensure target page exists (may not exist if never flushed before crash)
-                while (fh->get_file_hdr().num_pages <= log_rec.rid_.page_no) {
-                    RmPageHandle ph = fh->create_new_page_handle();
-                    buffer_pool_manager_->unpin_page(ph.page->get_page_id(), true);
+                // Ensure the page exists on disk before we try to read it
+                int target_pages = log_rec.rid_.page_no + 1;
+                if (fh->get_file_hdr().num_pages < target_pages) {
+                    fh->set_num_pages(target_pages);
                 }
+                disk_manager_->ensure_pages(fh->GetFd(), target_pages);
+                // Page-LSN idempotence barrier: skip if already applied
+                PageId pid{fh->GetFd(), log_rec.rid_.page_no};
+                Page* page = buffer_pool_manager_->fetch_page(pid);
+                if (page->get_page_lsn() >= lsn) {
+                    buffer_pool_manager_->unpin_page(pid, false);
+                    offset += log_tot_len;
+                    continue;
+                }
+                buffer_pool_manager_->unpin_page(pid, false);
                 fh->insert_record(log_rec.rid_, log_rec.insert_value_.data);
+                // Stamp the page with this log record's LSN
+                page = buffer_pool_manager_->fetch_page(pid);
+                page->set_page_lsn(lsn);
+                buffer_pool_manager_->unpin_page(pid, true);
             }
         } else if (log_type == LogType::DELETE) {
             DeleteLogRecord log_rec;
@@ -203,9 +214,28 @@ void RecoveryManager::redo() {
             auto it = sm_manager_->fhs_.find(table_name);
             if (it != sm_manager_->fhs_.end()) {
                 auto* fh = it->second.get();
-                if (log_rec.rid_.page_no < fh->get_file_hdr().num_pages) {
+                int target_pages = log_rec.rid_.page_no + 1;
+                if (fh->get_file_hdr().num_pages < target_pages) {
+                    fh->set_num_pages(target_pages);
+                }
+                disk_manager_->ensure_pages(fh->GetFd(), target_pages);
+                PageId pid{fh->GetFd(), log_rec.rid_.page_no};
+                Page* page = buffer_pool_manager_->fetch_page(pid);
+                if (page->get_page_lsn() >= lsn) {
+                    buffer_pool_manager_->unpin_page(pid, false);
+                    offset += log_tot_len;
+                    continue;
+                }
+                buffer_pool_manager_->unpin_page(pid, false);
+                // The slot may already be empty (idempotent redo: the
+                // INSERT before this DELETE may have been skipped because
+                // the page LSN already covered it).
+                if (fh->is_record(log_rec.rid_)) {
                     fh->delete_record(log_rec.rid_, nullptr);
                 }
+                page = buffer_pool_manager_->fetch_page(pid);
+                page->set_page_lsn(lsn);
+                buffer_pool_manager_->unpin_page(pid, true);
             }
         } else if (log_type == LogType::UPDATE) {
             UpdateLogRecord log_rec;
@@ -214,13 +244,40 @@ void RecoveryManager::redo() {
             auto it = sm_manager_->fhs_.find(table_name);
             if (it != sm_manager_->fhs_.end()) {
                 auto* fh = it->second.get();
-                if (log_rec.rid_.page_no < fh->get_file_hdr().num_pages) {
+                int target_pages = log_rec.rid_.page_no + 1;
+                if (fh->get_file_hdr().num_pages < target_pages) {
+                    fh->set_num_pages(target_pages);
+                }
+                disk_manager_->ensure_pages(fh->GetFd(), target_pages);
+                PageId pid{fh->GetFd(), log_rec.rid_.page_no};
+                Page* page = buffer_pool_manager_->fetch_page(pid);
+                if (page->get_page_lsn() >= lsn) {
+                    buffer_pool_manager_->unpin_page(pid, false);
+                    offset += log_tot_len;
+                    continue;
+                }
+                buffer_pool_manager_->unpin_page(pid, false);
+                // Idempotent redo: only update if the record exists (the
+                // INSERT may have been skipped because the page LSN was
+                // already up-to-date from a previous recovery pass).
+                if (fh->is_record(log_rec.rid_)) {
                     fh->update_record(log_rec.rid_, log_rec.new_value_.data, nullptr);
                 }
+                page = buffer_pool_manager_->fetch_page(pid);
+                page->set_page_lsn(lsn);
+                buffer_pool_manager_->unpin_page(pid, true);
             }
         }
 
         offset += log_tot_len;
+    }
+
+    // Persist file headers + dirty pages to disk so a nested crash
+    // during undo can recover from the redo-completed state.
+    for (auto& entry : sm_manager_->fhs_) {
+        auto* fh = entry.second.get();
+        fh->flush_file_hdr();  // write in-memory num_pages to disk
+        buffer_pool_manager_->flush_all_pages(fh->GetFd());
     }
 }
 
@@ -247,6 +304,8 @@ void RecoveryManager::undo() {
     }
     log_size_ = 0;
 
-    // Truncate WAL after recovery to prevent LSN conflicts on next run
-    disk_manager_->truncate_log();
+    // NOTE: We intentionally do NOT truncate the WAL here.  If a nested
+    // crash occurs during recovery, the next recovery pass needs the
+    // original log records.  The log_manager appends new records after the
+    // last valid LSN, so old records don't interfere.
 }

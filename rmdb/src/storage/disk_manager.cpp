@@ -215,6 +215,26 @@ int DiskManager::get_file_fd(const std::string &file_name) {
     return path2fd_[file_name];
 }
 
+void DiskManager::ensure_pages(int fd, int num_pages) {
+    // Find the file path from fd
+    auto it = fd2path_.find(fd);
+    if (it == fd2path_.end()) return;
+    int file_size = get_file_size(it->second);
+    int current_pages = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (current_pages >= num_pages) return;
+
+    // Extend the file by writing zeroed pages at the end
+    char zero_page[PAGE_SIZE];
+    memset(zero_page, 0, PAGE_SIZE);
+    for (int p = current_pages; p < num_pages; p++) {
+        ssize_t written = pwrite(fd, zero_page, PAGE_SIZE,
+                                 static_cast<off_t>(p) * PAGE_SIZE);
+        if (written != PAGE_SIZE) {
+            throw InternalError("DiskManager::ensure_pages Error");
+        }
+    }
+}
+
 
 /**
  * @description:  读取日志文件内容

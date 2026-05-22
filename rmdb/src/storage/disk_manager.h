@@ -65,6 +65,10 @@ class DiskManager {
 
     int get_file_fd(const std::string &file_name);
 
+    /** Ensure the file backing @p fd has at least @p num_pages pages on disk.
+     *  Writes zeroed pages to extend the file if needed. */
+    void ensure_pages(int fd, int num_pages);
+
     /*日志操作*/
     int read_log(char *log_data, int size, int offset);
 
