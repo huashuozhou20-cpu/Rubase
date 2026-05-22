@@ -25,7 +25,7 @@ See the Mulan PSL v2 for more details. */
 #include "analyze/analyze.h"
 #include "execution/executor_abstract.h"
 
-#define SOCK_PORT 8765
+#define DEFAULT_PORT 8765
 #define MAX_CONN_LIMIT 8
 
 static bool should_exit = false;
@@ -417,7 +417,7 @@ void *client_handler(void *sock_fd) {
     pthread_exit(NULL);  // terminate calling thread!
 }
 
-void start_server() {
+void start_server(int port) {
     // init mutex
     buffer_mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
     sockfd_mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
@@ -432,13 +432,22 @@ void start_server() {
     sockfd_server = socket(AF_INET, SOCK_STREAM, 0);  // ipv4,TCP
     assert(sockfd_server != -1);
     int val = 1;
-    setsockopt(sockfd_server, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+    if (setsockopt(sockfd_server, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
+        std::cerr << "setsockopt(SO_REUSEADDR) failed: " << strerror(errno) << std::endl;
+        exit(1);
+    }
+#ifdef SO_REUSEPORT
+    if (setsockopt(sockfd_server, SOL_SOCKET, SO_REUSEPORT, &val, sizeof(val)) < 0) {
+        std::cerr << "setsockopt(SO_REUSEPORT) failed: " << strerror(errno) << std::endl;
+        exit(1);
+    }
+#endif
 
     // before bind(), set the attr of structure sockaddr.
     memset(&s_addr_in, 0, sizeof(s_addr_in));
     s_addr_in.sin_family = AF_INET;
     s_addr_in.sin_addr.s_addr = htonl(INADDR_ANY);
-    s_addr_in.sin_port = htons(SOCK_PORT);
+    s_addr_in.sin_port = htons(port);
     fd_temp = bind(sockfd_server, (struct sockaddr *)(&s_addr_in), sizeof(s_addr_in));
     if (fd_temp == -1) {
         std::cout << "Bind error!" << std::endl;
@@ -501,10 +510,14 @@ void start_server() {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        // 需要指定数据库名称
-        std::cerr << "Usage: " << argv[0] << " <database>" << std::endl;
+    if (argc < 2 || argc > 3) {
+        std::cerr << "Usage: " << argv[0] << " <database> [port]" << std::endl;
         exit(1);
+    }
+
+    int port = DEFAULT_PORT;
+    if (argc >= 3) {
+        port = std::stoi(argv[2]);
     }
 
     signal(SIGINT, sigint_handler);
@@ -533,9 +546,9 @@ int main(int argc, char **argv) {
         recovery->analyze();
         recovery->redo();
         recovery->undo();
-        
+
         // 开启服务端，开始接受客户端连接
-        start_server();
+        start_server(port);
     } catch (RMDBError &e) {
         std::cerr << e.what() << std::endl;
         exit(1);

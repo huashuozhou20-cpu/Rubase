@@ -86,7 +86,7 @@ class IxNodeHandle {
 
     PageId get_page_id() { return page->get_page_id(); }
 
-    void unlatch() const { page->runlock(); }  // release read latch
+    Page *get_page() const { return page; }
 
     page_id_t get_next_leaf() { return page_hdr->next_leaf; }
 

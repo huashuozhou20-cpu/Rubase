@@ -64,6 +64,7 @@ public:
     }
     // used for debug
     virtual void format_print() {
+#ifndef NDEBUG
         std::cout << "log type in father_function: " << LogTypeStr[log_type_] << "\n";
         printf("Print Log Record:\n");
         printf("log_type_: %s\n", LogTypeStr[log_type_].c_str());
@@ -71,6 +72,7 @@ public:
         printf("log_tot_len: %d\n", log_tot_len_);
         printf("log_tid: %lld\n", static_cast<long long>(log_tid_));
         printf("prev_lsn: %d\n", prev_lsn_);
+#endif
     }
 };
 
@@ -95,8 +97,10 @@ public:
         LogRecord::deserialize(src);   
     }
     virtual void format_print() override {
+#ifndef NDEBUG
         std::cout << "log type in son_function: " << LogTypeStr[log_type_] << "\n";
         LogRecord::format_print();
+#endif
     }
 };
 
@@ -119,8 +123,10 @@ public:
         LogRecord::deserialize(src);
     }
     void format_print() override {
+#ifndef NDEBUG
         std::cout << "log type in son_function: " << LogTypeStr[log_type_] << "\n";
         LogRecord::format_print();
+#endif
     }
 };
 
@@ -143,8 +149,10 @@ public:
         LogRecord::deserialize(src);
     }
     void format_print() override {
+#ifndef NDEBUG
         std::cout << "log type in son_function: " << LogTypeStr[log_type_] << "\n";
         LogRecord::format_print();
+#endif
     }
 };
 
@@ -199,11 +207,13 @@ public:
         memcpy(table_name_, src + offset, table_name_size_);
     }
     void format_print() override {
+#ifndef NDEBUG
         printf("insert record\n");
         LogRecord::format_print();
         printf("insert_value: %s\n", insert_value_.data);
         printf("insert rid: %d, %d\n", rid_.page_no, rid_.slot_no);
         printf("table name: %s\n", table_name_);
+#endif
     }
 
     RmRecord insert_value_;     // 插入的记录
@@ -260,10 +270,12 @@ public:
         memcpy(table_name_, src + offset, table_name_size_);
     }
     void format_print() override {
+#ifndef NDEBUG
         printf("delete record\n");
         LogRecord::format_print();
         printf("delete rid: %d, %d\n", rid_.page_no, rid_.slot_no);
         printf("table name: %s\n", table_name_);
+#endif
     }
     RmRecord delete_value_;     // 被删除的记录
     Rid rid_;                   // 记录删除的位置
@@ -328,10 +340,12 @@ public:
         memcpy(table_name_, src + offset, table_name_size_);
     }
     void format_print() override {
+#ifndef NDEBUG
         printf("update record\n");
         LogRecord::format_print();
         printf("update rid: %d, %d\n", rid_.page_no, rid_.slot_no);
         printf("table name: %s\n", table_name_);
+#endif
     }
     RmRecord old_value_;        // 更新前的记录
     RmRecord new_value_;        // 更新后的记录

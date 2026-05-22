@@ -28,6 +28,15 @@ DB = "/tmp/rmdb_crash_align"
 
 def start_fresh_server():
     subprocess.run(["rm", "-rf", DB], capture_output=True)
+    return _launch_server()
+
+
+def restart_server():
+    """Restart without deleting — keeps WAL + data files for recovery."""
+    return _launch_server()
+
+
+def _launch_server():
     return subprocess.Popen([SERVER, DB], cwd=BUILD_DIR,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -125,9 +134,9 @@ def main():
 
         time.sleep(1)
 
-        # Phase 3: Restart and verify WAL recovery
+        # Phase 3: Restart and verify WAL recovery (keep DB intact)
         print("\n[Phase 3] Restart server + WAL recovery...")
-        p2 = start_fresh_server()
+        p2 = restart_server()
         if not wait_for_server():
             print("FAIL: Server won't restart")
             return False

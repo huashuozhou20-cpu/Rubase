@@ -143,15 +143,15 @@ class InsertExecutor : public AbstractExecutor {
                 auto ih = sm_manager_->ihs_.at(
                     sm_manager_->get_ix_manager()->get_index_name(
                         tab_name_, pk_idx.cols)).get();
-                // Use find_leaf_page + leaf_lookup directly so we can unlatch
+                // Use find_leaf_page + leaf_lookup with RAII latch guard
                 bool found = false;
                 {
                     auto result = ih->find_leaf_page(pk_key.data(),
                         Operation::FIND, nullptr, false);
                     auto leaf = std::move(result.first);
+                    PageLatchGuard latch(leaf->get_page(), false, adopt_latch);
                     Rid* rid;
                     found = leaf->leaf_lookup(pk_key.data(), &rid);
-                    leaf->unlatch();  // release read latch before insert
                 }
                 if (found) {
                     throw RMDBError("Duplicate key error: primary key already exists");
@@ -181,6 +181,7 @@ class InsertExecutor : public AbstractExecutor {
                     auto result = ih->find_leaf_page(insert_key.data(),
                         Operation::FIND, nullptr, false);
                     auto leaf_guard = std::move(result.first);
+                    PageLatchGuard latch(leaf_guard->get_page(), false, adopt_latch);
                     int slot = leaf_guard->upper_bound(insert_key.data());
                     const char* next_key = nullptr;
                     if (slot < leaf_guard->get_size()) {
@@ -188,7 +189,7 @@ class InsertExecutor : public AbstractExecutor {
                     }
                     // Release the read latch BEFORE acquiring LockManager locks
                     // (otherwise insert_entry would deadlock on write latch)
-                    leaf_guard->unlatch();
+                    latch.release();
                     if (next_key != nullptr) {
                         context_->lock_mgr_->lock_insert_intention_on_key(
                             context_->txn_, fh_->GetFd(), 0,

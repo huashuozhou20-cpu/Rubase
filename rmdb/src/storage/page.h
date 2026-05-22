@@ -103,4 +103,69 @@ class Page {
     /** Per-page read/write latch for B+Tree concurrency control (latch crabbing).
      *  Shared for readers, exclusive for writers. */
     mutable std::shared_mutex latch_;
+
+   public:
+    int get_pin_count() const { return pin_count_; }
+};
+
+/** Tag type for adopting an already-held page latch. */
+struct adopt_latch_t {};
+constexpr adopt_latch_t adopt_latch{};
+
+/** RAII guard for Page read/write latches.
+ *  Ensures the latch is released on scope exit, even if an exception is thrown.
+ *  Supports two modes:
+ *    - ACQUIRE (default): acquires the latch in the constructor.
+ *    - ADOPT (with adopt_latch tag): takes ownership of an already-held latch;
+ *      the destructor will still release it. */
+class PageLatchGuard {
+    Page *page_;
+    bool exclusive_;
+
+   public:
+    /** Acquire a new latch on @p page. */
+    PageLatchGuard(Page *page, bool exclusive) : page_(page), exclusive_(exclusive) {
+        if (page_) {
+            if (exclusive_)
+                page_->wlock();
+            else
+                page_->rlock();
+        }
+    }
+
+    /** Adopt an already-held latch. The destructor WILL release it. */
+    PageLatchGuard(Page *page, bool exclusive, adopt_latch_t) : page_(page), exclusive_(exclusive) {}
+
+    ~PageLatchGuard() { release(); }
+
+    PageLatchGuard(const PageLatchGuard &) = delete;
+    PageLatchGuard &operator=(const PageLatchGuard &) = delete;
+
+    PageLatchGuard(PageLatchGuard &&other) noexcept : page_(other.page_), exclusive_(other.exclusive_) {
+        other.page_ = nullptr;
+    }
+
+    PageLatchGuard &operator=(PageLatchGuard &&other) noexcept {
+        if (this != &other) {
+            release();
+            page_ = other.page_;
+            exclusive_ = other.exclusive_;
+            other.page_ = nullptr;
+        }
+        return *this;
+    }
+
+    /** Release the latch early. */
+    void release() {
+        if (page_) {
+            if (exclusive_)
+                page_->wunlock();
+            else
+                page_->runlock();
+            page_ = nullptr;
+        }
+    }
+
+    /** Disarm without releasing — caller takes manual control. */
+    void disarm() { page_ = nullptr; }
 };

@@ -36,6 +36,8 @@ bool BufferPoolShard::find_victim_page(frame_id_t *frame_id) {
 
 void BufferPoolShard::update_page(Page *page, PageId new_page_id,
                                    frame_id_t new_frame_id) {
+    // Must never evict a page that is still pinned by an active iterator or executor.
+    assert(page->pin_count_ == 0);
     if (page->is_dirty_) {
         disk_manager_->write_page(page->id_.fd, page->id_.page_no,
                                   page->data_, PAGE_SIZE);
@@ -112,6 +114,8 @@ Page *BufferPoolShard::new_page(PageId *page_id) {
         return nullptr;
     }
     Page *page = &pages_[frame_id];
+    // Victim page must not be pinned by any active thread.
+    assert(page->pin_count_ == 0);
     if (page->is_dirty_) {
         disk_manager_->write_page(page->id_.fd, page->id_.page_no,
                                   page->data_, PAGE_SIZE);

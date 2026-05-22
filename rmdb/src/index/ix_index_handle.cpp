@@ -302,8 +302,8 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
     }
 
     auto parent = fetch_node(old_node->get_parent_page_no());
-    // Write-latch parent before modifying its child list
-    parent->page->wlock();
+    // RAII write-latch: released on scope exit even if split/recursive insert throws
+    PageLatchGuard parent_latch(parent->page, true);
     int child_idx = parent->find_child(old_node);
     Rid rid = {.page_no = new_node->get_page_no(), .slot_no = 0};
     parent->insert_pair(child_idx + 1, key, rid);
@@ -316,7 +316,6 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
     }
 
     parent.set_dirty(true);
-    parent->page->wunlock();
 }
 
 /**
@@ -332,8 +331,8 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
     auto result = find_leaf_page(key, Operation::INSERT, transaction);
     auto leaf = std::move(result.first);
 
-    // Write-latch the leaf page before modifying it
-    leaf->page->wlock();
+    // RAII write-latch: released on scope exit even if split/insert_into_parent throws
+    PageLatchGuard leaf_latch(leaf->page, true);
     leaf->insert(key, value);
     page_id_t leaf_page_no = leaf->get_page_no();
 
@@ -347,7 +346,6 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
     }
 
     leaf.set_dirty(true);
-    leaf->page->wunlock();
     return leaf_page_no;
 }
 
@@ -363,13 +361,12 @@ bool IxIndexHandle::delete_entry(const char *key, Transaction *transaction) {
     auto result = find_leaf_page(key, Operation::DELETE, transaction);
     auto leaf = std::move(result.first);
 
-    // Write-latch the leaf before modifying
-    leaf->page->wlock();
+    // RAII write-latch: released on scope exit even if coalesce/redistribute throws
+    PageLatchGuard leaf_latch(leaf->page, true);
     int old_size = leaf->get_size();
     leaf->remove(key);
     if (leaf->get_size() == old_size) {
-        // key not found
-        leaf->page->wunlock();
+        // key not found — leaf_latch releases write latch on return
         return false;
     }
 
@@ -377,12 +374,6 @@ bool IxIndexHandle::delete_entry(const char *key, Transaction *transaction) {
 
     if (!node_should_delete) {
         leaf.set_dirty(true);
-    }
-
-    leaf->page->wunlock();
-
-    if (node_should_delete) {
-        // root was deleted or merged, recursively handled
     }
 
     return true;
@@ -408,29 +399,30 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle *node, Transaction *tr
     }
 
     auto parent = fetch_node(node->get_parent_page_no());
-    parent->page->wlock();  // write-latch parent before modifying child list
+    PageLatchGuard parent_latch(parent->page, true);
     int index = parent->find_child(node);
 
     int neighbor_index = (index > 0) ? index - 1 : 1;
     auto neighbor = fetch_node(parent->value_at(neighbor_index));
-    neighbor->page->wlock();  // write-latch neighbor before modifying
+    PageLatchGuard neighbor_latch(neighbor->page, true);
 
     if (neighbor->get_size() + node->get_size() >= 2 * node->get_min_size()) {
         redistribute(neighbor.get(), node, parent.get(), index);
         parent.set_dirty(true);
         neighbor.set_dirty(true);
-        neighbor->page->wunlock();
-        parent->page->wunlock();
+        // both latches auto-released by guards on return
         return false;
     }
 
-    // coalesce: extract raw pointers since coalesce may swap them
+    // coalesce: extract raw pointers since coalesce may swap them.
+    // Disarm the latch guards so the write latches stay held through coalesce.
     IxNodeHandle *raw_neighbor = neighbor.release();
     IxNodeHandle *raw_parent = parent.release();
+    neighbor_latch.disarm();
+    parent_latch.disarm();
     bool parent_should_delete = coalesce(raw_neighbor, node, raw_parent, index, transaction, root_is_latched);
     // after coalesce: right node merged into left (neighbor), right deleted
     // raw_neighbor and node may have been swapped by coalesce if index==0
-    // raw_neighbor->page is still write-latched (raw_neighbor was released from guard)
     raw_neighbor->page->wunlock();
     raw_parent->page->wunlock();
     destroy_node(raw_neighbor, true);
@@ -562,14 +554,11 @@ bool IxIndexHandle::coalesce(IxNodeHandle *&neighbor_node, IxNodeHandle *&node, 
  */
 Rid IxIndexHandle::get_rid(const Iid &iid) const {
     auto node = fetch_node(iid.page_no);
-    node->page->rlock();
+    PageLatchGuard latch(node->page, false);  // RAII read-latch
     if (iid.slot_no >= node->get_size()) {
-        node->page->runlock();
         throw IndexEntryNotFoundError();
     }
-    Rid rid = *node->get_rid(iid.slot_no);
-    node->page->runlock();
-    return rid;
+    return *node->get_rid(iid.slot_no);
 }
 
 /**
@@ -674,25 +663,25 @@ void IxIndexHandle::decrement_page_count() {
  */
 void IxIndexHandle::maintain_parent(IxNodeHandle *node) {
     IxNodeHandle *curr = node;
-    IxNodeHandle *released = nullptr;  // track released guard for cleanup
+    IxNodeHandle *released = nullptr;
     while (curr->get_parent_page_no() != IX_NO_PAGE) {
         auto parent = fetch_node(curr->get_parent_page_no());
-        parent->page->wlock();
+        PageLatchGuard parent_latch(parent->page, true);
         int rank = parent->find_child(curr);
         char *parent_key = parent->get_key(rank);
         char *child_first_key = curr->get_key(0);
         if (memcmp(parent_key, child_first_key, file_hdr_->col_tot_len_) == 0) {
             parent.set_dirty(true);
-            parent->page->wunlock();
-            break;
+            break;  // parent_latch auto-releases on break
         }
         memcpy(parent_key, child_first_key, file_hdr_->col_tot_len_);
-        // transfer ownership: destroy previous released node, take new one
+        parent.set_dirty(true);
         if (released != nullptr) {
             released->page->wunlock();
             destroy_node(released, true);
         }
         released = parent.release();
+        parent_latch.disarm();  // keep latch held on the released page
         curr = released;
     }
     if (released != nullptr) {
