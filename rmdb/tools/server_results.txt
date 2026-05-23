@@ -1,31 +1,25 @@
-=== Sat May 23 08:14:02 PM CST 2026 ===
+=== Sat May 23 08:17:44 PM CST 2026 ===
 >>> git pull
 From github.com:huashuozhou20-cpu/Rubase
  * branch            main       -> FETCH_HEAD
-   81c6e75..daa0378  main       -> origin/main
-Updating 81c6e75..daa0378
-Fast-forward
- rmdb/CMakeLists.txt        | 21 +++++++++++++++++++--
- rmdb/src/common/config.cpp |  2 +-
- rmdb/tools/server_test.sh  | 26 ++++++++++++++++++++++++++
- 3 files changed, 46 insertions(+), 3 deletions(-)
+Already up to date.
 >>> system info
-host=iZuf6ig58ffzu9up0f2hjoZ cpu=4 commit=daa0378 perf: LTO + native arch, log_timeout 2ms, 16/32 thread benchmarks
+host=iZuf6ig58ffzu9up0f2hjoZ cpu=4 commit=ce38e28 test: server 05-23 20:15
 Linux iZuf6ig58ffzu9up0f2hjoZ 5.15.0-177-generic #187-Ubuntu SMP Sat Apr 11 22:54:33 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
-Mem:           3.4Gi       833Mi       884Mi       2.0Mi       1.7Gi       2.3Gi
+Mem:           3.4Gi       1.4Gi       717Mi       2.0Mi       1.4Gi       1.8Gi
 >>> build release
 -- Configuring done
 -- Generating done
 -- Build files have been written to: /home/obuser/Rubase/rmdb/build
-[ 98%] Built target unit_test
-[100%] Linking CXX executable ../bin/rmdb
-[100%] Built target test_parser
-lto-wrapper: warning: using serial compilation of 13 LTRANS jobs
+[ 91%] Built target parser
+Consolidate compiler generated dependencies of target test_parser
+Consolidate compiler generated dependencies of target rmdb
+[ 94%] Built target test_parser
 [100%] Built target rmdb
 >>> unit test
 [  PASSED  ] 5 tests.
 >>> sysbench 4 threads
-  [prepare] Done: 552 rows in sbtest
+  [prepare] Inserting 1000 baseline rows ...
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -38,29 +32,29 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 4 eps: 2854.62 lat (ms,95%): 2.86
-[ 10s ] thds: 4 eps: 2865.12 lat (ms,95%): 2.81
-[ 15s ] thds: 4 eps: 2854.79 lat (ms,95%): 2.81
+[ 5s ] thds: 4 eps: 2864.63 lat (ms,95%): 3.43
+[ 10s ] thds: 4 eps: 2871.30 lat (ms,95%): 3.43
+[ 15s ] thds: 4 eps: 2867.19 lat (ms,95%): 3.43
 
 General statistics:
-    total time:                          15.0019s
-    total number of events:              42879
+    total time:                          15.0023s
+    total number of events:              43022
 
 Latency (ms):
          min:                                    0.04
-         avg:                                    1.40
-         max:                                   21.09
-         95th percentile:                        2.81
-         sum:                                59983.70
+         avg:                                    1.39
+         max:                                    4.83
+         95th percentile:                        3.43
+         sum:                                59987.48
 
 Threads fairness:
-    events (avg/stddev):           10719.7500/4004.71
-    execution time (avg/stddev):   14.9959/0.00
+    events (avg/stddev):           10755.5000/8417.90
+    execution time (avg/stddev):   14.9969/0.00
 
 server-errors: 0
 0
 >>> sysbench 8 threads
-  [prepare] Done: 0 rows in sbtest
+  [prepare] Done: 552 rows in sbtest
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -73,24 +67,94 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 8 eps: 2873.83 lat (ms,95%): 4.74
-[ 10s ] thds: 8 eps: 2873.70 lat (ms,95%): 4.74
-[ 15s ] thds: 8 eps: 2864.48 lat (ms,95%): 4.74
+[ 5s ] thds: 8 eps: 2868.71 lat (ms,95%): 3.89
+[ 10s ] thds: 8 eps: 2864.72 lat (ms,95%): 3.89
+[ 15s ] thds: 8 eps: 2869.97 lat (ms,95%): 3.89
 
 General statistics:
-    total time:                          15.0027s
-    total number of events:              43068
+    total time:                          15.0026s
+    total number of events:              43026
 
 Latency (ms):
-         min:                                    0.05
+         min:                                    0.19
          avg:                                    2.79
-         max:                                   21.83
-         95th percentile:                        4.74
-         sum:                               119981.67
+         max:                                    5.56
+         95th percentile:                        3.89
+         sum:                               119987.04
 
 Threads fairness:
-    events (avg/stddev):           5383.5000/437.56
-    execution time (avg/stddev):   14.9977/0.00
+    events (avg/stddev):           5378.2500/958.50
+    execution time (avg/stddev):   14.9984/0.00
+
+server-errors: 0
+0
+>>> sysbench 16 threads
+  [prepare] Done: 552 rows in sbtest
+sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
+
+Running the test with following options:
+Number of threads: 16
+Report intermediate results every 5 second(s)
+Initializing random number generator from current time
+
+
+Initializing worker threads...
+
+Threads started!
+
+[ 5s ] thds: 16 eps: 1175.36 lat (ms,95%): 14.21
+[ 10s ] thds: 16 eps: 1175.25 lat (ms,95%): 14.21
+[ 15s ] thds: 16 eps: 1170.40 lat (ms,95%): 14.21
+
+General statistics:
+    total time:                          15.0137s
+    total number of events:              17622
+
+Latency (ms):
+         min:                                    0.76
+         avg:                                   13.63
+         max:                                   24.84
+         95th percentile:                       14.21
+         sum:                               240103.85
+
+Threads fairness:
+    events (avg/stddev):           1101.3750/0.48
+    execution time (avg/stddev):   15.0065/0.00
+
+server-errors: 0
+0
+>>> sysbench 32 threads
+  [prepare] Done: 552 rows in sbtest
+sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
+
+Running the test with following options:
+Number of threads: 32
+Report intermediate results every 5 second(s)
+Initializing random number generator from current time
+
+
+Initializing worker threads...
+
+Threads started!
+
+[ 5s ] thds: 32 eps: 1178.51 lat (ms,95%): 27.66
+[ 10s ] thds: 32 eps: 1178.45 lat (ms,95%): 27.66
+[ 15s ] thds: 32 eps: 1176.80 lat (ms,95%): 27.66
+
+General statistics:
+    total time:                          15.0286s
+    total number of events:              17704
+
+Latency (ms):
+         min:                                    0.12
+         avg:                                   27.14
+         max:                                   29.45
+         95th percentile:                       27.66
+         sum:                               480442.20
+
+Threads fairness:
+    events (avg/stddev):           553.2500/0.50
+    execution time (avg/stddev):   15.0138/0.01
 
 server-errors: 0
 0
