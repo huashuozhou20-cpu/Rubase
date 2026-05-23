@@ -14,7 +14,7 @@ See the Mulan PSL v2 for more details. */
 #include "record/rm_file_handle.h"
 #include "system/sm_manager.h"
 
-std::unordered_map<txn_id_t, std::shared_ptr<Transaction>> TransactionManager::txn_map = {};
+std::unordered_map<txn_id_t, Transaction *> TransactionManager::txn_map = {};
 
 /**
  * @description: 事务的开始方法
@@ -23,15 +23,9 @@ std::unordered_map<txn_id_t, std::shared_ptr<Transaction>> TransactionManager::t
  * @param {LogManager*} log_manager 日志管理器指针
  */
 Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manager) {
-    std::shared_ptr<Transaction> sp_txn;
     if (txn == nullptr) {
         txn_id_t txn_id = next_txn_id_++;
-        sp_txn = std::make_shared<Transaction>(txn_id);
-        txn = sp_txn.get();
-    } else {
-        // Reusing existing transaction — wrap in a non-owning shared_ptr?
-        // In practice, begin(nullptr) is always called, so this is the fresh path.
-        sp_txn = std::shared_ptr<Transaction>(txn, [](Transaction*){});  // no-op deleter
+        txn = new Transaction(txn_id);
     }
     txn->set_state(TransactionState::GROWING);
 
@@ -40,7 +34,6 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         txn->set_start_ts(txn->get_read_ts());
         running_txns_.AddTxn(txn->get_read_ts());
 
-        // Build ReadView under latch_ (txn_map iteration must be protected)
         ReadView rv;
         rv.low_limit_id_ = next_txn_id_.load();
         rv.up_limit_id_ = rv.low_limit_id_;
@@ -58,7 +51,7 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
     }
 
     std::scoped_lock lock(latch_);
-    TransactionManager::txn_map[txn->get_transaction_id()] = sp_txn;
+    TransactionManager::txn_map[txn->get_transaction_id()] = txn;
 
     auto* begin_log = new BeginLogRecord(txn->get_transaction_id());
     lsn_t lsn = log_manager->add_log_to_buffer(begin_log);
@@ -249,9 +242,7 @@ std::optional<UndoLog> TransactionManager::GetUndoLogOptional(UndoLink link) {
     if (it == TransactionManager::txn_map.end()) {
         return std::nullopt;
     }
-    // Hold shared_ptr to prevent GC from deleting this txn mid-access
-    auto sp = it->second;
-    return sp->GetUndoLog(link.prev_log_idx_);
+    return it->second->GetUndoLog(link.prev_log_idx_);
 }
 
 UndoLog TransactionManager::GetUndoLog(UndoLink link) {
@@ -267,11 +258,36 @@ timestamp_t TransactionManager::GetWatermark() {
     return running_txns_.GetWatermark();
 }
 
+int TransactionManager::RegisterThread() {
+    for (int i = 0; i < MAX_THREADS; ++i) {
+        timestamp_t expected = 0;
+        if (thread_active_ts_[i].compare_exchange_strong(expected, INT64_MAX)) {
+            return i;
+        }
+    }
+    return -1;  // all slots taken
+}
+
+void TransactionManager::UnregisterThread(int slot) {
+    if (slot >= 0 && slot < MAX_THREADS) {
+        thread_active_ts_[slot].store(0, std::memory_order_release);
+    }
+}
+
 void TransactionManager::GarbageCollection() {
     timestamp_t watermark = GetWatermark();
-    // watermark_ starts at 0 (constructor default). Skip GC until at least
-    // one commit has advanced it past the initial value.
     if (watermark <= 0) return;
+
+    // Compute global minimum active timestamp across all worker threads.
+    // A thread that hasn't registered (ts == 0) or is idle (ts == INT64_MAX)
+    // does not constrain GC.
+    timestamp_t global_min = INT64_MAX;
+    for (int i = 0; i < MAX_THREADS; ++i) {
+        timestamp_t ts = thread_active_ts_[i].load(std::memory_order_acquire);
+        if (ts > 0 && ts < global_min) global_min = ts;
+    }
+    // Also respect the system watermark
+    if (watermark < global_min) global_min = watermark;
 
     std::unordered_set<txn_id_t> deleted_ids;
 
@@ -282,41 +298,35 @@ void TransactionManager::GarbageCollection() {
         for (auto& [txn_id, txn] : TransactionManager::txn_map) {
             auto state = txn->get_state();
             if (state == TransactionState::COMMITTED || state == TransactionState::ABORTED) {
-                if (txn->get_commit_ts() < watermark) {
-                    // Only erase if no other thread holds a reference via get_transaction().
-                    // If use_count > 1, a concurrent reader is still using this txn;
-                    // defer deletion to the next GC cycle.
-                    if (txn.use_count() == 1) {
-                        to_erase.push_back(txn_id);
-                    }
+                // Safe to delete: every active thread is reading at a timestamp
+                // strictly greater than this txn's commit_ts.
+                if (txn->get_commit_ts() < global_min) {
+                    to_erase.push_back(txn_id);
                 }
             }
         }
 
         for (auto& txn_id : to_erase) {
-            TransactionManager::txn_map.erase(txn_id);
-            deleted_ids.insert(txn_id);
-            // shared_ptr destructor automatically frees Transaction
+            auto it = TransactionManager::txn_map.find(txn_id);
+            if (it != TransactionManager::txn_map.end()) {
+                delete it->second;
+                TransactionManager::txn_map.erase(it);
+                deleted_ids.insert(txn_id);
+            }
         }
     }
 
-    // Phase 2: clean up version_info_ entries whose prev_txn_ has been GC'd
+    // Phase 2: clean up version_info_ entries
     if (!deleted_ids.empty()) {
         std::unique_lock<std::shared_mutex> map_lock(version_info_mutex_);
-
         std::vector<page_id_t> empty_pages;
         for (auto& [page_no, page_info] : version_info_) {
             std::unique_lock<std::shared_mutex> page_lock(page_info->mutex_);
-
             std::vector<slot_offset_t> stale_slots;
             for (auto& [slot_no, vlink] : page_info->prev_version_) {
                 txn_id_t prev_txn = vlink.prev_.prev_txn_;
                 if (prev_txn == INVALID_TXN_ID) continue;
-                // Stale if the owning txn was GC'd (or already gone)
-                if (deleted_ids.count(prev_txn)) {
-                    stale_slots.push_back(slot_no);
-                    continue;
-                }
+                if (deleted_ids.count(prev_txn)) { stale_slots.push_back(slot_no); continue; }
                 {
                     std::scoped_lock txn_lock(latch_);
                     if (TransactionManager::txn_map.find(prev_txn) == TransactionManager::txn_map.end()) {
@@ -324,18 +334,9 @@ void TransactionManager::GarbageCollection() {
                     }
                 }
             }
-
-            for (auto slot : stale_slots) {
-                page_info->prev_version_.erase(slot);
-            }
-
-            if (page_info->prev_version_.empty()) {
-                empty_pages.push_back(page_no);
-            }
+            for (auto slot : stale_slots) page_info->prev_version_.erase(slot);
+            if (page_info->prev_version_.empty()) empty_pages.push_back(page_no);
         }
-
-        for (auto page : empty_pages) {
-            version_info_.erase(page);
-        }
+        for (auto page : empty_pages) version_info_.erase(page);
     }
 }

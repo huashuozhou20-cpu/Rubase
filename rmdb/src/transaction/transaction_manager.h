@@ -74,24 +74,26 @@ public:
      * @return {Transaction*} 事务对象的指针
      * @param {txn_id_t} txn_id 事务ID
      */    
-    std::shared_ptr<Transaction> get_transaction(txn_id_t txn_id) {
+    Transaction* get_transaction(txn_id_t txn_id) {
         if(txn_id == INVALID_TXN_ID) return nullptr;
-
         std::unique_lock<std::mutex> lock(latch_);
         auto it = TransactionManager::txn_map.find(txn_id);
-        if (it == TransactionManager::txn_map.end()) {
-            return nullptr;
-        }
-        auto res = it->second;
-        lock.unlock();
-        assert(res != nullptr);
-        // thread-id check removed — epoll workers may legitimately access
-        // a transaction created by a different worker thread.
-
-        return res;
+        if (it == TransactionManager::txn_map.end()) return nullptr;
+        return it->second;
     }
 
-    static std::unordered_map<txn_id_t, std::shared_ptr<Transaction>> txn_map;
+    // Watermark-based GC: worker threads register their current read_ts
+    // before accessing MVCC state.  GC computes the global minimum across
+    // all threads and only deletes txns below that threshold.
+    static constexpr int MAX_THREADS = 128;
+    std::atomic<timestamp_t> thread_active_ts_[MAX_THREADS]{};
+    int RegisterThread();
+    void UnregisterThread(int slot);
+    void SetThreadActiveTs(int slot, timestamp_t ts) {
+        thread_active_ts_[slot].store(ts, std::memory_order_release);
+    }
+
+    static std::unordered_map<txn_id_t, Transaction *> txn_map;
     std::shared_mutex txn_map_mutex_;
     /** ------------------------以下函数仅可能在MVCC当中使用------------------------------------------*/
 

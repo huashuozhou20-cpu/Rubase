@@ -184,13 +184,23 @@ static void process_query(int conn_fd, const std::string &stmt_str) {
     memset(data_send, 0, BUFFER_LENGTH);
     int offset = 0;
 
+    // Register this worker thread's active read timestamp for GC watermark.
+    // Thread-local slot persists across queries on the same worker.
+    static thread_local int gc_slot = txn_manager->RegisterThread();
+
     // Fresh auto-commit transaction for every query (epoll workers are pooled)
     int64_t txn_id = begin_autocommit_txn();
     Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr,
                                    data_send, &offset);
     context->txn_mgr_ = txn_manager.get();
-    auto sp_txn = txn_manager->get_transaction(txn_id);
-    context->txn_ = sp_txn.get();
+    context->txn_ = txn_manager->get_transaction(txn_id);
+
+    // Publish current read timestamp so GC knows this thread is active
+    if (gc_slot >= 0 && context->txn_) {
+        txn_manager->SetThreadActiveTs(gc_slot, context->txn_->get_read_ts());
+    }
+    context->txn_mgr_ = txn_manager.get();
+    context->txn_ = txn_manager->get_transaction(txn_id);
 
     bool finish_analyze = false;
 
@@ -283,6 +293,10 @@ send_response:
     // Autocommit single-statement transactions
     if (context->txn_ && !context->txn_->get_txn_mode()) {
         txn_manager->commit(context->txn_, log_manager.get());
+    }
+    // Mark this thread as idle for GC watermark
+    if (gc_slot >= 0) {
+        txn_manager->SetThreadActiveTs(gc_slot, INT64_MAX);
     }
     delete context;
 }
