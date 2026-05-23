@@ -189,14 +189,15 @@ std::pair<NodeHandleGuard, bool> IxIndexHandle::find_leaf_page(const char *key, 
     auto node = fetch_node(page_no);
 
     if (operation == Operation::FIND) {
-        // Hand-over-hand read latches: latch child before releasing parent,
-        // preventing a concurrent split from making the child pointer stale.
+        // Hand-over-hand read latches on internal nodes.
+        // (Lock-free versioned traversal is used in the optimistic
+        //  insert_entry path where a clear fallback exists.)
         node->page->rlock();
         while (!node->is_leaf_page()) {
             page_id_t child_page_no = node->internal_lookup(key);
             auto child = fetch_node(child_page_no);
             child->page->rlock();
-            node->page->runlock();   // release parent after child is latched
+            node->page->runlock();
             node = std::move(child);
         }
         return std::make_pair(std::move(node), false);
@@ -414,37 +415,63 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
  * @return page_id_t 插入到的叶结点的page_no
  */
 page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transaction *transaction) {
-    std::vector<NodeHandleGuard> retained;
-    auto leaf = crabbing_find_leaf(key, Operation::INSERT, retained);
+    // ---- Optimistic path: read-lock traverse, upgrade leaf to write-lock.
+    //      >90% of inserts do not cause a split, so ancestors are untouched.
+    {
+        auto result = find_leaf_page(key, Operation::FIND, transaction);
+        auto leaf = std::move(result.first);
+        page_id_t leaf_page_no = leaf->get_page_no();
 
-    PageLatchGuard leaf_latch(leaf->page, true, adopt_latch);
+        // Hand off: runlock → wlock on the same pinned page
+        leaf->page->runlock();
+        leaf->page->wlock();
+        PageLatchGuard leaf_latch(leaf->page, true, adopt_latch);
 
-    leaf->insert(key, value);
-    page_id_t leaf_page_no = leaf->get_page_no();
+        // Fast path: leaf has room
+        if (leaf->get_size() < leaf->get_max_size()) {
+            leaf->insert(key, value);
+            leaf.set_dirty(true);
+            return leaf_page_no;
+        }
 
-    if (leaf->get_size() > leaf->get_max_size()) {
-        auto new_leaf = split(leaf.get());
-        if (file_hdr_->last_leaf_ == leaf->get_page_no()) {
-            file_hdr_->last_leaf_ = new_leaf->get_page_no();
-        }
-        IxNodeHandle *ret_parent = nullptr;
-        if (!retained.empty()) {
-            ret_parent = retained.back().get();
-        }
-        insert_into_parent(leaf.get(), new_leaf->get_key(0), new_leaf.get(),
-                          transaction, ret_parent);
-        // insert_into_parent adopted and released the retained parent's wlock.
-        // Just pop it from the retained list (lock already released).
-        if (!retained.empty()) {
-            retained.pop_back();
-        }
-        new_leaf.set_dirty(true);
+        // Leaf is full — fall back to pessimistic crab locking
+        leaf_latch.release();
+        leaf->page->wunlock();
     }
 
-    for (auto &anc : retained) anc->page->wunlock();
+pessimistic_insert:
+    // ---- Pessimistic path (split required) ----
+    {
+        std::vector<NodeHandleGuard> retained;
+        auto leaf = crabbing_find_leaf(key, Operation::INSERT, retained);
 
-    leaf.set_dirty(true);
-    return leaf_page_no;
+        PageLatchGuard leaf_latch(leaf->page, true, adopt_latch);
+
+        leaf->insert(key, value);
+        page_id_t leaf_page_no = leaf->get_page_no();
+
+        if (leaf->get_size() > leaf->get_max_size()) {
+            auto new_leaf = split(leaf.get());
+            if (file_hdr_->last_leaf_ == leaf->get_page_no()) {
+                file_hdr_->last_leaf_ = new_leaf->get_page_no();
+            }
+            IxNodeHandle *ret_parent = nullptr;
+            if (!retained.empty()) {
+                ret_parent = retained.back().get();
+            }
+            insert_into_parent(leaf.get(), new_leaf->get_key(0), new_leaf.get(),
+                              transaction, ret_parent);
+            if (!retained.empty()) {
+                retained.pop_back();
+            }
+            new_leaf.set_dirty(true);
+        }
+
+        for (auto &anc : retained) anc->page->wunlock();
+
+        leaf.set_dirty(true);
+        return leaf_page_no;
+    }
 }
 
 /**
@@ -453,31 +480,47 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
  * @param transaction 事务指针
  */
 bool IxIndexHandle::delete_entry(const char *key, Transaction *transaction) {
-    // Crab-locking: leaf is returned with wlock already held.
-    auto result = find_leaf_page(key, Operation::DELETE, transaction);
-    auto leaf = std::move(result.first);
+    // ---- Optimistic path: read-lock traverse, upgrade leaf to write-lock ----
+    {
+        auto result = find_leaf_page(key, Operation::FIND, transaction);
+        auto leaf = std::move(result.first);
 
-    // adopt the wlock already held by find_leaf_page
-    PageLatchGuard leaf_latch(leaf->page, true, adopt_latch);
-    int old_size = leaf->get_size();
-    leaf->remove(key);
-    if (leaf->get_size() == old_size) {
-        // key not found — leaf_latch releases write latch on return
-        return false;
+        leaf->page->runlock();
+        leaf->page->wlock();
+        PageLatchGuard leaf_latch(leaf->page, true, adopt_latch);
+
+        // Fast path: leaf won't underflow
+        if (leaf->get_size() > leaf->get_min_size()) {
+            int old_size = leaf->get_size();
+            leaf->remove(key);
+            if (leaf->get_size() != old_size) {
+                leaf.set_dirty(true);
+                return true;
+            }
+            return false;
+        }
+
+        leaf_latch.release();
+        leaf->page->wunlock();
     }
 
-    bool node_consumed = coalesce_or_redistribute(leaf.get(), transaction, nullptr);
+pessimistic_delete:
+    {
+        auto result = find_leaf_page(key, Operation::DELETE, transaction);
+        auto leaf = std::move(result.first);
+        PageLatchGuard leaf_latch(leaf->page, true, adopt_latch);
+        int old_size = leaf->get_size();
+        leaf->remove(key);
+        if (leaf->get_size() == old_size) return false;
 
-    if (node_consumed) {
-        // Node was consumed by coalesce or root adjustment — cleanup
-        // (unpin + delete) was already handled internally.  Disarm
-        // the guard to prevent a double-free.
-        leaf.release();
-    } else {
-        leaf.set_dirty(true);
+        bool node_consumed = coalesce_or_redistribute(leaf.get(), transaction, nullptr);
+        if (node_consumed) {
+            leaf.release();
+        } else {
+            leaf.set_dirty(true);
+        }
+        return true;
     }
-
-    return true;
 }
 
 /**

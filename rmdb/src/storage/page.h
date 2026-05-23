@@ -10,8 +10,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
-#include <shared_mutex>
-
+#include "common/rwlatch.h"
 #include "common/config.h"
 
 /**
@@ -83,6 +82,9 @@ class Page {
     inline void wlock() { latch_.lock(); }
     inline void wunlock() { latch_.unlock(); }
 
+    // Access the underlying latch (for optimistic sequence-based traversal)
+    inline ReaderWriterSpinLatch &GetLatch() const { return latch_; }
+
    private:
     void reset_memory() { memset(data_, OFFSET_PAGE_START, PAGE_SIZE); }  // 将data_的PAGE_SIZE个字节填充为0
 
@@ -101,8 +103,9 @@ class Page {
     int pin_count_ = 0;
 
     /** Per-page read/write latch for B+Tree concurrency control (latch crabbing).
-     *  Shared for readers, exclusive for writers. */
-    mutable std::shared_mutex latch_;
+     *  Shared for readers, exclusive for writers.  User-space spinlock — no
+     *  kernel involvement, pure CAS + cpu_relax back-off. */
+    mutable ReaderWriterSpinLatch latch_;
 
    public:
     int get_pin_count() const { return pin_count_; }
