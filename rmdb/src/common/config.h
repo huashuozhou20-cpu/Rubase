@@ -24,7 +24,7 @@ extern std::chrono::milliseconds cycle_detection_interval;
 extern std::atomic<bool> enable_logging;
 
 /** If ENABLE_LOGGING is true, the log should be flushed to disk every LOG_TIMEOUT. */
-extern std::chrono::microseconds log_timeout;  // 500 us group-commit interval
+extern std::chrono::milliseconds log_timeout;  // 1 ms balanced group-commit interval
 
 static constexpr int INVALID_FRAME_ID = -1;                                   // invalid frame id
 static constexpr int INVALID_PAGE_ID = -1;                                    // invalid page id
