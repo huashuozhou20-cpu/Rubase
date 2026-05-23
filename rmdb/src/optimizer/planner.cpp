@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #include "planner.h"
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 
 #include "execution/executor_delete.h"
@@ -266,10 +267,14 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
     for (size_t i = 0; i < tables.size(); i++) {
         auto curr_conds = pop_conds(query->conds, tables[i]);
         std::vector<std::string> index_col_names;
-        // Use SeqScan for correctness (IndexScan has known issues)
-        index_col_names.clear();
-        table_scan_executors[i] =
-            std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
+        bool has_index = get_index_cols(tables[i], curr_conds, index_col_names);
+        if (has_index) {
+            table_scan_executors[i] =
+                std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, tables[i], curr_conds, index_col_names);
+        } else {
+            table_scan_executors[i] =
+                std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
+        }
     }
     // 只有一个表，不需要join。
     if(tables.size() == 1)
@@ -474,6 +479,36 @@ std::shared_ptr<Plan> Planner::generate_select_plan(std::shared_ptr<Query> query
     plannerRoot = std::make_shared<ProjectionPlan>(T_Projection, std::move(plannerRoot),
                                                         std::move(sel_cols));
 
+    // Enable index-only scan on any underlying ScanPlan whose index covers
+    // every column needed by the final projection.
+    {
+        auto proj = std::dynamic_pointer_cast<ProjectionPlan>(plannerRoot);
+        if (proj) {
+            std::function<void(std::shared_ptr<Plan>)> enable_index_only;
+            enable_index_only = [&](std::shared_ptr<Plan> node) {
+                if (auto scan = std::dynamic_pointer_cast<ScanPlan>(node)) {
+                    if (scan->can_do_index_only(sm_manager_, proj->sel_cols_)) {
+                        scan->is_index_only_ = true;
+                    }
+                } else if (auto join = std::dynamic_pointer_cast<JoinPlan>(node)) {
+                    enable_index_only(join->left_);
+                    enable_index_only(join->right_);
+                } else if (auto proj2 = std::dynamic_pointer_cast<ProjectionPlan>(node)) {
+                    enable_index_only(proj2->subplan_);
+                } else if (auto sort = std::dynamic_pointer_cast<SortPlan>(node)) {
+                    enable_index_only(sort->subplan_);
+                } else if (auto agg = std::dynamic_pointer_cast<AggregationPlan>(node)) {
+                    enable_index_only(agg->subplan_);
+                } else if (auto dist = std::dynamic_pointer_cast<DistinctPlan>(node)) {
+                    enable_index_only(dist->subplan_);
+                } else if (auto lim = std::dynamic_pointer_cast<LimitPlan>(node)) {
+                    enable_index_only(lim->subplan_);
+                }
+            };
+            enable_index_only(proj->subplan_);
+        }
+    }
+
     return plannerRoot;
 }
 
@@ -522,18 +557,22 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
                                                     query->values_list, std::vector<Condition>(), std::vector<SetClause>(),
                                                     query->col_names);
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(query->parse)) {
-        // delete: always use SeqScan for correctness
+        // delete: prefer IndexScan when index matches WHERE conditions
         std::vector<std::string> index_col_names;
-        auto table_scan_executors =
-            std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, x->tab_name, query->conds, index_col_names);
+        bool has_index = get_index_cols(x->tab_name, query->conds, index_col_names);
+        auto table_scan_executors = has_index
+            ? std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, x->tab_name, query->conds, index_col_names)
+            : std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, x->tab_name, query->conds, index_col_names);
 
         plannerRoot = std::make_shared<DMLPlan>(T_Delete, table_scan_executors, x->tab_name,
                                                 std::vector<std::vector<Value>>(), query->conds, std::vector<SetClause>());
     } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(query->parse)) {
-        // update: always use SeqScan for correctness
+        // update: prefer IndexScan when index matches WHERE conditions
         std::vector<std::string> index_col_names;
-        auto table_scan_executors =
-            std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, x->tab_name, query->conds, index_col_names);
+        bool has_index = get_index_cols(x->tab_name, query->conds, index_col_names);
+        auto table_scan_executors = has_index
+            ? std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, x->tab_name, query->conds, index_col_names)
+            : std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, x->tab_name, query->conds, index_col_names);
 
         plannerRoot = std::make_shared<DMLPlan>(T_Update, table_scan_executors, x->tab_name,
                                                      std::vector<std::vector<Value>>(), query->conds,

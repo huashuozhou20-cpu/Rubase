@@ -38,7 +38,44 @@ class IndexScanExecutor : public AbstractExecutor {
     bool guard_locked_;    // GAP lock already acquired on the guard
     int active_index_id_;  // which index we're scanning (0=primary, etc.)
 
+    // Index-only scan: when true, assemble tuples from index-key bytes
+    // without fetching table pages (all output columns are index-covered).
+    bool is_index_only_ = false;
+    // Cached record for index-only mode — built once per matching key.
+    std::unique_ptr<RmRecord> cached_record_;
+
     SmManager *sm_manager_;
+
+    // Build a full-width RmRecord from only the index-key bytes.  The index
+    // stores concatenated column values in index-column order; we copy each
+    // component into the record at its table-schema offset so downstream
+    // operators (condition eval, projection) see the data at the right places.
+    // Allocates from the per-query arena to avoid malloc/free contention.
+    std::unique_ptr<RmRecord> build_record_from_key(const IxIndexHandle *ih,
+                                                     IxScan *scan) const {
+        const char *key = scan->get_key();
+        // Try arena allocation first (zero-lock, O(1)); fall back to heap
+        char *buf = context_->arena_.Allocate(len_);
+        std::unique_ptr<RmRecord> rec;
+        if (buf) {
+            rec = std::make_unique<RmRecord>(static_cast<int>(len_), buf, false);
+        } else {
+            rec = std::make_unique<RmRecord>(static_cast<int>(len_));
+        }
+        memset(rec->data, 0, len_);
+        int key_off = 0;
+        for (const auto &idx_col : index_meta_.cols) {
+            // Find the corresponding table column to get its record offset
+            for (const auto &tab_col : tab_.cols) {
+                if (tab_col.name == idx_col.name) {
+                    memcpy(rec->data + tab_col.offset, key + key_off, idx_col.len);
+                    break;
+                }
+            }
+            key_off += idx_col.len;
+        }
+        return rec;
+    }
 
     const ColMeta *get_col_meta(const TabCol &target) {
         for (auto &col : tab_.cols) {
@@ -195,7 +232,8 @@ class IndexScanExecutor : public AbstractExecutor {
 
    public:
     IndexScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds,
-                      std::vector<std::string> index_col_names, Context *context) {
+                      std::vector<std::string> index_col_names, Context *context,
+                      bool is_index_only = false) {
         sm_manager_ = sm_manager;
         context_ = context;
         tab_name_ = std::move(tab_name);
@@ -203,6 +241,7 @@ class IndexScanExecutor : public AbstractExecutor {
         conds_ = std::move(conds);
         index_col_names_ = index_col_names;
         index_meta_ = *(tab_.get_index_meta(index_col_names_));
+        is_index_only_ = is_index_only;
         // Find which index this is (0 = primary, etc.)
         active_index_id_ = 0;
         for (size_t i = 0; i < tab_.indexes.size(); i++) {
@@ -344,6 +383,22 @@ class IndexScanExecutor : public AbstractExecutor {
                 return;
             }
             rid_ = scan_->rid();
+
+            // Index-only fast path: build record from index-key bytes,
+            // evaluate conditions, and cache the result — no table I/O.
+            if (is_index_only_) {
+                auto* ix_scan = dynamic_cast<IxScan*>(scan_.get());
+                if (!ix_scan) continue;
+                auto rec = build_record_from_key(
+                    sm_manager_->ihs_.at(
+                        sm_manager_->get_ix_manager()->get_index_name(
+                            tab_name_, index_meta_.cols)).get(),
+                    ix_scan);
+                if (!check_all_conds(*rec)) continue;
+                cached_record_ = std::move(rec);
+                return;
+            }
+
             if (for_update) {
                 auto rec = fh_->get_record_for_update(rid_, context_);
                 // Lock-before-filter: acquire GAP on every index-touched key
@@ -373,8 +428,18 @@ class IndexScanExecutor : public AbstractExecutor {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;
             } else {
-                auto snap = fh_->get_record_snapshot(rid_);
-                if (!snap || !check_all_conds(*snap)) continue;
+                // Arena-backed snapshot: read directly into arena buffer to avoid
+                // heap allocation on every scanned row.
+                char *snap_buf = context_->arena_.Allocate(len_);
+                if (snap_buf) {
+                    if (!fh_->get_record_into(rid_, snap_buf)) continue;
+                    RmRecord snap(len_, snap_buf, false);
+                    if (!check_all_conds(snap)) continue;
+                    // Record passes filter — Next() will re-read it for the result
+                } else {
+                    auto snap = fh_->get_record_snapshot(rid_);
+                    if (!snap || !check_all_conds(*snap)) continue;
+                }
                 auto rec = fh_->get_record(rid_, context_);
                 if (check_all_conds(*rec)) return;
             }
@@ -389,11 +454,20 @@ class IndexScanExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_) return nullptr;
+        // Index-only: return the already-built cached record — no table I/O
+        if (is_index_only_ && cached_record_) {
+            return std::move(cached_record_);
+        }
         if (use_for_update()) {
             return fh_->get_record(rid_, context_);
         }
         if (use_mvcc_read()) {
             return get_visible_record(rid_);
+        }
+        // Arena-backed read: bypass heap allocation for the final record fetch
+        char *buf = context_->arena_.Allocate(len_);
+        if (buf && fh_->get_record_into(rid_, buf)) {
+            return std::make_unique<RmRecord>(static_cast<int>(len_), buf, false);
         }
         return fh_->get_record(rid_, context_);
     }

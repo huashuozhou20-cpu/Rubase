@@ -97,6 +97,14 @@ struct RmRecord {
         allocated_ = true;
     }
 
+    // Non-owning: data points to externally-managed memory (e.g. arena).
+    // The destructor will NOT free it.
+    RmRecord(int size_, char* data_, bool owned) {
+        size = size_;
+        data = data_;
+        allocated_ = owned;
+    }
+
     void SetData(char* data_) {
         memcpy(data, data_, size);
     }

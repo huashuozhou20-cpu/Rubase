@@ -72,17 +72,49 @@ class ScanPlan : public Plan
             len_ = cols_.back().offset + cols_.back().len;
             fed_conds_ = conds_;
             index_col_names_ = index_col_names;
-        
+
         }
         ~ScanPlan(){}
+
+        // Check whether every required output column is covered by the chosen
+        // index.  When true the scan can skip table fetches entirely and
+        // assemble tuples directly from index-key bytes (index-only scan).
+        bool can_do_index_only(SmManager *sm_manager,
+                               const std::vector<TabCol> &sel_cols) const {
+            if (index_col_names_.empty()) return false;
+            if (sel_cols.empty()) return false;
+            const auto &tab = sm_manager->db_.get_table(tab_name_);
+            // Find the matching index metadata
+            const IndexMeta *matched = nullptr;
+            for (const auto &idx : tab.indexes) {
+                if (static_cast<size_t>(idx.col_num) == index_col_names_.size()) {
+                    bool match = true;
+                    for (size_t i = 0; i < index_col_names_.size(); i++) {
+                        if (idx.cols[i].name != index_col_names_[i]) { match = false; break; }
+                    }
+                    if (match) { matched = &idx; break; }
+                }
+            }
+            if (!matched) return false;
+            for (const auto &sc : sel_cols) {
+                bool found = false;
+                for (const auto &idx_col : matched->cols) {
+                    if (idx_col.name == sc.col_name) { found = true; break; }
+                }
+                if (!found) return false;
+            }
+            return true;
+        }
+
         // 以下变量同ScanExecutor中的变量
-        std::string tab_name_;                     
-        std::vector<ColMeta> cols_;                
-        std::vector<Condition> conds_;             
-        size_t len_;                               
+        std::string tab_name_;
+        std::vector<ColMeta> cols_;
+        std::vector<Condition> conds_;
+        size_t len_;
         std::vector<Condition> fed_conds_;
         std::vector<std::string> index_col_names_;
-    
+        bool is_index_only_ = false;
+
 };
 
 class JoinPlan : public Plan

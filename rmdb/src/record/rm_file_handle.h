@@ -86,6 +86,11 @@ class RmFileHandle {
     // Lock-free snapshot read for MVCC — reads slot data without acquiring 2PL locks.
     std::unique_ptr<RmRecord> get_record_snapshot(const Rid &rid) const;
 
+    // Read record data directly into caller-provided buffer (arena-backed).
+    // Returns false if the slot is empty, true on success.
+    // Caller must hold appropriate locks (same contract as get_record_snapshot).
+    bool get_record_into(const Rid &rid, char *buf) const;
+
     txn_id_t get_record_trx_id(const Rid &rid) const;
 
     Rid insert_record(char *buf, Context *context);

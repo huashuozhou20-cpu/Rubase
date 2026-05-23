@@ -69,6 +69,23 @@ std::unique_ptr<RmRecord> RmFileHandle::get_record_snapshot(const Rid& rid) cons
 }
 
 /**
+ * @description: Read record data directly into a caller-provided buffer.
+ *               Avoids heap allocation — the buffer typically comes from an arena.
+ *               Returns false if the slot is empty.
+ */
+bool RmFileHandle::get_record_into(const Rid& rid, char* buf) const {
+    RmPageHandle page_handle = fetch_page_handle(rid.page_no);
+    if (!Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
+        buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+        return false;
+    }
+    char* slot = page_handle.get_slot(rid.slot_no);
+    memcpy(buf, slot, file_hdr_.record_size);
+    buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+    return true;
+}
+
+/**
  * @description: 读取记录中隐藏的 trx_id 字段（最后修改此记录的事务ID）
  */
 txn_id_t RmFileHandle::get_record_trx_id(const Rid& rid) const {

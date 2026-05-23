@@ -348,12 +348,15 @@ class SeqScanExecutor : public AbstractExecutor {
                 nextTuple();
             }
         } else {
-            auto snap = fh_->get_record_snapshot(rid_);
-            if (!snap || !check_all_conds(*snap)) {
-                nextTuple();
+            char *snap_buf = context_->arena_.Allocate(len_);
+            if (snap_buf) {
+                if (!fh_->get_record_into(rid_, snap_buf) ||
+                    !check_all_conds(RmRecord(len_, snap_buf, false))) {
+                    nextTuple();
+                }
             } else {
-                auto rec = fh_->get_record(rid_, context_);
-                if (!check_all_conds(*rec)) {
+                auto snap = fh_->get_record_snapshot(rid_);
+                if (!snap || !check_all_conds(*snap)) {
                     nextTuple();
                 }
             }
@@ -405,8 +408,16 @@ class SeqScanExecutor : public AbstractExecutor {
                 auto rec = get_visible_record(rid_);
                 if (rec && check_all_conds(*rec)) return;
             } else {
-                auto snap = fh_->get_record_snapshot(rid_);
-                if (!snap || !check_all_conds(*snap)) continue;
+                // Arena-backed snapshot: skip heap allocation
+                char *snap_buf = context_->arena_.Allocate(len_);
+                if (snap_buf) {
+                    if (!fh_->get_record_into(rid_, snap_buf)) continue;
+                    RmRecord snap(len_, snap_buf, false);
+                    if (!check_all_conds(snap)) continue;
+                } else {
+                    auto snap = fh_->get_record_snapshot(rid_);
+                    if (!snap || !check_all_conds(*snap)) continue;
+                }
                 auto rec = fh_->get_record(rid_, context_);
                 if (check_all_conds(*rec)) return;
             }
@@ -435,6 +446,11 @@ class SeqScanExecutor : public AbstractExecutor {
         }
         if (use_mvcc_read()) {
             return get_visible_record(rid_);
+        }
+        // Arena-backed: avoid heap alloc for the final record fetch
+        char *buf = context_->arena_.Allocate(len_);
+        if (buf && fh_->get_record_into(rid_, buf)) {
+            return std::make_unique<RmRecord>(static_cast<int>(len_), buf, false);
         }
         return fh_->get_record(rid_, context_);
     }
