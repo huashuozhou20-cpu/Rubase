@@ -189,18 +189,49 @@ std::pair<NodeHandleGuard, bool> IxIndexHandle::find_leaf_page(const char *key, 
     auto node = fetch_node(page_no);
 
     if (operation == Operation::FIND) {
-        // Hand-over-hand read latches on internal nodes.
-        // (Lock-free versioned traversal is used in the optimistic
-        //  insert_entry path where a clear fallback exists.)
-        node->page->rlock();
-        while (!node->is_leaf_page()) {
-            page_id_t child_page_no = node->internal_lookup(key);
-            auto child = fetch_node(child_page_no);
-            child->page->rlock();
-            node->page->runlock();
-            node = std::move(child);
+        // ---- Lock-free optimistic traversal of internal nodes ----
+        // Use version-sequence validation instead of rlock.  Each internal
+        // node is read without any latch; we verify the sequence before and
+        // after.  A mismatch means a concurrent split changed the pointers,
+        // so we restart from the root.
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            page_id_t root_pn = file_hdr_->root_page_;
+            auto curr = fetch_node(root_pn);
+            uint64_t seq = curr->page->GetLatch().GetSequence();
+            if (seq & 1) continue;  // writer active → retry
+
+            while (!curr->is_leaf_page()) {
+                // Read child pointer (no lock)
+                page_id_t child_pn = curr->internal_lookup(key);
+                // Validate: sequence unchanged since we read the child pointer
+                if (curr->page->GetLatch().GetSequence() != seq) {
+                    goto retry_lockfree;
+                }
+                auto child = fetch_node(child_pn);
+                curr = std::move(child);
+                seq = curr->page->GetLatch().GetSequence();
+                if (seq & 1) goto retry_lockfree;
+            }
+            // Reached leaf — acquire rlock for safe data access
+            curr->page->rlock();
+            return std::make_pair(std::move(curr), false);
+        retry_lockfree:;
         }
-        return std::make_pair(std::move(node), false);
+
+        // Fallback: hand-over-hand rlock (SpinLatch — fast user-space)
+        {
+            page_id_t page_no = file_hdr_->root_page_;
+            auto node = fetch_node(page_no);
+            node->page->rlock();
+            while (!node->is_leaf_page()) {
+                page_id_t child_pn = node->internal_lookup(key);
+                auto child = fetch_node(child_pn);
+                child->page->rlock();
+                node->page->runlock();
+                node = std::move(child);
+            }
+            return std::make_pair(std::move(node), false);
+        }
     }
 
     // INSERT / DELETE: basic hand-over-hand (no safety tracking).
