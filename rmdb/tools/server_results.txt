@@ -1,25 +1,26 @@
-=== Sat May 23 08:28:07 PM CST 2026 ===
+=== Sat May 23 08:37:12 PM CST 2026 ===
 >>> git pull
 From github.com:huashuozhou20-cpu/Rubase
  * branch            main       -> FETCH_HEAD
-   122e3b3..8293669  main       -> origin/main
-Updating 122e3b3..8293669
+   71bbac3..f0ac45b  main       -> origin/main
+Updating 71bbac3..f0ac45b
 Fast-forward
- rmdb/src/recovery/log_manager.cpp | 12 +++---------
- 1 file changed, 3 insertions(+), 9 deletions(-)
+ rmdb/src/recovery/log_manager.cpp | 18 ++++++++++++------
+ rmdb/src/recovery/log_manager.h   |  5 +++--
+ 2 files changed, 15 insertions(+), 8 deletions(-)
 >>> system info
-host=iZuf6ig58ffzu9up0f2hjoZ cpu=4 commit=8293669 fix: close lost-wakeup race in wait_for_persist_lsn
+host=iZuf6ig58ffzu9up0f2hjoZ cpu=4 commit=f0ac45b perf: atomic persist_lsn_ with spin-then-cv hybrid wait
 Linux iZuf6ig58ffzu9up0f2hjoZ 5.15.0-177-generic #187-Ubuntu SMP Sat Apr 11 22:54:33 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
-Mem:           3.4Gi       2.2Gi       240Mi       2.0Mi       981Mi       917Mi
+Mem:           3.4Gi       2.8Gi       381Mi       2.0Mi       270Mi       402Mi
 >>> build release
 -- Configuring done
 -- Generating done
 -- Build files have been written to: /home/obuser/Rubase/rmdb/build
-[ 92%] Built target recoverys
-lto-wrapper: warning: using serial compilation of 13 LTRANS jobs
-[ 94%] Built target test_parser
-[ 96%] Built target unit_test
-[100%] Built target rmdb
+[ 32%] Built target analyze
+[ 33%] Linking CXX shared library ../../lib/librecoverys.so
+[ 33%] Built target records
+[ 33%] Built target recoverys
+make: *** [Makefile:146: all] Error 2
 >>> unit test
 [  PASSED  ] 5 tests.
 >>> sysbench 4 threads
@@ -36,29 +37,29 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 4 eps: 2353.93 lat (ms,95%): 3.49
-[ 10s ] thds: 4 eps: 2356.89 lat (ms,95%): 3.49
-[ 15s ] thds: 4 eps: 2350.40 lat (ms,95%): 3.49
+[ 5s ] thds: 4 eps: 2866.39 lat (ms,95%): 3.36
+[ 10s ] thds: 4 eps: 2866.10 lat (ms,95%): 3.36
+[ 15s ] thds: 4 eps: 2866.39 lat (ms,95%): 3.36
 
 General statistics:
     total time:                          15.0029s
-    total number of events:              35312
+    total number of events:              43001
 
 Latency (ms):
          min:                                    0.04
-         avg:                                    1.70
-         max:                                    4.87
-         95th percentile:                        3.49
-         sum:                                59992.85
+         avg:                                    1.39
+         max:                                   10.06
+         95th percentile:                        3.36
+         sum:                                59984.50
 
 Threads fairness:
-    events (avg/stddev):           8828.0000/5101.65
-    execution time (avg/stddev):   14.9982/0.00
+    events (avg/stddev):           10750.2500/1918.37
+    execution time (avg/stddev):   14.9961/0.00
 
 server-errors: 0
 0
 >>> sysbench 8 threads
-  [prepare] Done: 0 rows in sbtest
+  [prepare] Inserting 1000 baseline rows ...
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -71,29 +72,29 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 8 eps: 4891.03 lat (ms,95%): 3.75
-[ 10s ] thds: 8 eps: 4139.76 lat (ms,95%): 6.79
-[ 15s ] thds: 8 eps: 4322.21 lat (ms,95%): 6.43
+[ 5s ] thds: 8 eps: 3515.87 lat (ms,95%): 6.79
+[ 10s ] thds: 8 eps: 3461.93 lat (ms,95%): 6.79
+[ 15s ] thds: 8 eps: 3428.33 lat (ms,95%): 6.79
 
 General statistics:
-    total time:                          15.0074s
-    total number of events:              66777
+    total time:                          15.0040s
+    total number of events:              52042
 
 Latency (ms):
          min:                                    0.04
-         avg:                                    1.80
-         max:                                   37.98
-         95th percentile:                        5.00
-         sum:                               120013.05
+         avg:                                    2.31
+         max:                                   24.44
+         95th percentile:                        6.79
+         sum:                               119986.73
 
 Threads fairness:
-    events (avg/stddev):           8347.1250/4971.62
-    execution time (avg/stddev):   15.0016/0.00
+    events (avg/stddev):           6505.2500/6257.13
+    execution time (avg/stddev):   14.9983/0.00
 
 server-errors: 0
 0
 >>> sysbench 16 threads
-  [prepare] Inserting 1000 baseline rows ...
+  [prepare] Done: 552 rows in sbtest
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -106,60 +107,29 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 16 eps: 1178.15 lat (ms,95%): 13.95
-[ 10s ] thds: 16 eps: 1177.65 lat (ms,95%): 13.95
-[ 15s ] thds: 16 eps: 1177.60 lat (ms,95%): 13.95
+[ 5s ] thds: 16 eps: 2350.19 lat (ms,95%): 10.09
+[ 10s ] thds: 16 eps: 2348.60 lat (ms,95%): 10.09
+[ 15s ] thds: 16 eps: 2349.55 lat (ms,95%): 10.09
 
 General statistics:
-    total time:                          15.0129s
-    total number of events:              17684
+    total time:                          15.0085s
+    total number of events:              35260
 
 Latency (ms):
-         min:                                    0.50
-         avg:                                   13.58
-         max:                                   15.39
-         95th percentile:                       13.95
-         sum:                               240095.56
+         min:                                    0.19
+         avg:                                    6.81
+         max:                                   12.24
+         95th percentile:                       10.09
+         sum:                               240019.40
 
 Threads fairness:
-    events (avg/stddev):           1105.2500/0.43
-    execution time (avg/stddev):   15.0060/0.00
+    events (avg/stddev):           2203.7500/277.98
+    execution time (avg/stddev):   15.0012/0.00
 
 server-errors: 0
 0
 >>> sysbench 32 threads
-  [prepare] Inserting 1000 baseline rows ...
-sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
-
-Running the test with following options:
-Number of threads: 32
-Report intermediate results every 5 second(s)
-Initializing random number generator from current time
-
-
-Initializing worker threads...
-
-Threads started!
-
-[ 5s ] thds: 32 eps: 1177.67 lat (ms,95%): 27.66
-[ 10s ] thds: 32 eps: 1179.24 lat (ms,95%): 27.66
-[ 15s ] thds: 32 eps: 1176.00 lat (ms,95%): 27.66
-
-General statistics:
-    total time:                          15.0269s
-    total number of events:              17699
-
-Latency (ms):
-         min:                                    0.91
-         avg:                                   27.14
-         max:                                   29.03
-         95th percentile:                       27.66
-         sum:                               480432.97
-
-Threads fairness:
-    events (avg/stddev):           553.0938/0.38
-    execution time (avg/stddev):   15.0135/0.01
-
+  [prepare] Done: 552 rows in sbtest
 server-errors: 0
 0
 >>> push results
