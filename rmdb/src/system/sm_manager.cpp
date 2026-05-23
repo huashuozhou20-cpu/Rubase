@@ -85,6 +85,7 @@ void SmManager::drop_db(const std::string& db_name) {
  * @param {string&} db_name 数据库名称，与文件夹同名
  */
 void SmManager::open_db(const std::string& db_name) {
+    db_path_ = db_name;  // for rebuild_indexes sentinel
     if (!is_dir(db_name)) {
         throw DatabaseNotFoundError(db_name);
     }

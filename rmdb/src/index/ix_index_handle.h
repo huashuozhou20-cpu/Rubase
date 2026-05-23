@@ -229,7 +229,13 @@ class IxIndexHandle {
     BufferPoolManager *buffer_pool_manager_;
     int fd_;                                    // 存储B+树的文件
     IxFileHdr* file_hdr_;                       // 存了root_page，但其初始化为2（第0页存FILE_HDR_PAGE，第1页存LEAF_HEADER_PAGE）
-    std::mutex root_latch_;
+    // root_latch_ removed — replaced by crab-locking (latch coupling) on write paths.
+
+    // Crab down to the leaf with safe-node protocol.  Returns the leaf
+    // (wlocked) and populates |retained| with ancestors that were "unsafe"
+    // and thus kept wlocked for split / merge propagation.
+    NodeHandleGuard crabbing_find_leaf(const char *key, Operation operation,
+                                       std::vector<NodeHandleGuard> &retained);
 
    public:
     IxIndexHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd);
@@ -247,7 +253,8 @@ class IxIndexHandle {
 
     NodeHandleGuard split(IxNodeHandle *node);
 
-    void insert_into_parent(IxNodeHandle *old_node, const char *key, IxNodeHandle *new_node, Transaction *transaction);
+    void insert_into_parent(IxNodeHandle *old_node, const char *key, IxNodeHandle *new_node, Transaction *transaction,
+                            IxNodeHandle *retained_parent = nullptr);
 
     // for delete
     bool delete_entry(const char *key, Transaction *transaction);

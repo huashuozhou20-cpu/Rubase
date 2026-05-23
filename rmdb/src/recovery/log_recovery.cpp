@@ -10,6 +10,7 @@ See the Mulan PSL v2 for more details. */
 
 #include "log_recovery.h"
 
+#include <fstream>
 #include <unordered_set>
 
 #include "record/rm_file_handle.h"
@@ -320,6 +321,10 @@ void RecoveryManager::rebuild_indexes() {
     auto* ix_mgr = sm_manager_->get_ix_manager();
     auto& db = sm_manager_->db_;
 
+    // ---- Atomic sentinel: if a previous rebuild was interrupted by a crash,
+    //      the marker file will still exist and we know we must re-rebuild. ----
+    std::string marker_path = sm_manager_->get_db_path() + "/.index_rebuild_in_progress";
+
     for (auto& tab_entry : db.tables()) {
         auto& tab = tab_entry.second;
         std::string tab_name = tab.name;
@@ -351,6 +356,13 @@ void RecoveryManager::rebuild_indexes() {
             // Open the fresh index and store the handle
             auto ih = ix_mgr->open_index(tab_name, index.cols);
             sm_manager_->ihs_.emplace(ix_name, std::move(ih));
+
+            // Write sentinel BEFORE scanning — if we crash during the scan
+            // the file remains, and the next recovery will redo the rebuild.
+            {
+                std::ofstream ofs(marker_path, std::ios::trunc);
+                ofs << tab_name << "\n" << ix_name << "\n";
+            }
         }
 
         // ---- Phase 2: scan the recovered record file and re-insert -------
@@ -384,4 +396,7 @@ void RecoveryManager::rebuild_indexes() {
             scan.next();
         }
     }
+
+    // Rebuild completed successfully — clear the sentinel.
+    std::remove(marker_path.c_str());
 }

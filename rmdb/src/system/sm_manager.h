@@ -40,6 +40,7 @@ class SmManager {
     BufferPoolManager* buffer_pool_manager_;
     RmManager* rm_manager_;
     IxManager* ix_manager_;
+    std::string db_path_;  // set by open_db(), used by rebuild_indexes sentinel
 
    public:
     SmManager(DiskManager* disk_manager, BufferPoolManager* buffer_pool_manager, RmManager* rm_manager,
@@ -55,7 +56,9 @@ class SmManager {
 
     RmManager* get_rm_manager() { return rm_manager_; }  
 
-    IxManager* get_ix_manager() { return ix_manager_; }  
+    IxManager* get_ix_manager() { return ix_manager_; }
+
+    const std::string& get_db_path() const { return db_path_; }
 
     bool is_dir(const std::string& db_name);
 

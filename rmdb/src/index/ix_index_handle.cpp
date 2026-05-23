@@ -202,14 +202,54 @@ std::pair<NodeHandleGuard, bool> IxIndexHandle::find_leaf_page(const char *key, 
         return std::make_pair(std::move(node), false);
     }
 
-    // INSERT / DELETE: serialized by root_latch_ in the caller.
-    // Page-level write latches are taken by the caller on the specific pages
-    // being modified (leaf + any ancestors that split/merge).
+    // INSERT / DELETE: basic hand-over-hand (no safety tracking).
+    // For write operations use crabbing_find_leaf() instead.
+    node->page->wlock();
     while (!node->is_leaf_page()) {
         page_id_t child_page_no = node->internal_lookup(key);
-        node = fetch_node(child_page_no);
+        auto child = fetch_node(child_page_no);
+        child->page->wlock();
+        node->page->wunlock();
+        node = std::move(child);
     }
     return std::make_pair(std::move(node), false);
+}
+
+/**
+ * @brief Crab-locking traversal for INSERT / DELETE with safe-node tracking.
+ *        Unsafe ancestors (those whose child might split or merge) are kept
+ *        wlocked so split / merge propagation has them ready.
+ */
+NodeHandleGuard IxIndexHandle::crabbing_find_leaf(const char *key, Operation operation,
+                                                    std::vector<NodeHandleGuard> &retained) {
+    retained.clear();
+    page_id_t page_no = file_hdr_->root_page_;
+    auto node = fetch_node(page_no);
+    node->page->wlock();
+
+    while (!node->is_leaf_page()) {
+        page_id_t child_page_no = node->internal_lookup(key);
+        auto child = fetch_node(child_page_no);
+        child->page->wlock();
+
+        bool safe = false;
+        if (operation == Operation::INSERT) {
+            safe = (child->get_size() < child->get_max_size());
+        } else {
+            safe = (child->get_size() > child->get_min_size());
+        }
+
+        if (safe) {
+            for (auto &anc : retained) anc->page->wunlock();
+            retained.clear();
+            node->page->wunlock();
+        } else {
+            retained.push_back(std::move(node));
+        }
+        node = std::move(child);
+    }
+
+    return std::move(node);
 }
 
 /**
@@ -303,7 +343,7 @@ NodeHandleGuard IxIndexHandle::split(IxNodeHandle *node) {
  * @note 本函数执行完毕后，new node和old node都需要在函数外面进行unpin
  */
 void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, IxNodeHandle *new_node,
-                                     Transaction *transaction) {
+                                     Transaction *transaction, IxNodeHandle *retained_parent) {
     if (old_node->is_root_page()) {
         auto new_root = create_node();
         new_root->page_hdr->is_leaf = false;
@@ -320,9 +360,21 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
         return;
     }
 
-    auto parent = fetch_node(old_node->get_parent_page_no());
-    // RAII write-latch: released on scope exit even if split/recursive insert throws
-    PageLatchGuard parent_latch(parent->page, true);
+    std::unique_ptr<NodeHandleGuard> parent_guard;
+    std::unique_ptr<PageLatchGuard> parent_latch;
+
+    if (retained_parent != nullptr) {
+        // Parent is already wlocked from the crab path — adopt it.
+        // The retained_parent stays alive in the caller's CrabbingPath.
+        parent_latch = std::make_unique<PageLatchGuard>(retained_parent->page, true, adopt_latch);
+    } else {
+        auto p = fetch_node(old_node->get_parent_page_no());
+        parent_latch = std::make_unique<PageLatchGuard>(p->page, true);
+        parent_guard = std::make_unique<NodeHandleGuard>(std::move(p));
+    }
+
+    IxNodeHandle *parent = retained_parent ? retained_parent
+                           : parent_guard->get();
     int child_idx = parent->find_child(old_node);
     Rid rid = {.page_no = new_node->get_page_no(), .slot_no = 0};
 
@@ -346,13 +398,13 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
         int sep_idx = parent->get_size() / 2;
         char *sep_key = new char[file_hdr_->col_tot_len_];
         memcpy(sep_key, parent->get_key(sep_idx), file_hdr_->col_tot_len_);
-        auto new_parent = split(parent.get());
-        insert_into_parent(parent.get(), sep_key, new_parent.get(), transaction);
+        auto new_parent = split(parent);
+        insert_into_parent(parent, sep_key, new_parent.get(), transaction);
         delete[] sep_key;
         new_parent.set_dirty(true);
     }
 
-    parent.set_dirty(true);
+    BufferPoolManager::mark_dirty(parent->page);
 }
 
 /**
@@ -362,14 +414,11 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
  * @return page_id_t 插入到的叶结点的page_no
  */
 page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transaction *transaction) {
-    // Serialize all index modifications to prevent concurrent split corruption
-    std::lock_guard<std::mutex> guard(root_latch_);
+    std::vector<NodeHandleGuard> retained;
+    auto leaf = crabbing_find_leaf(key, Operation::INSERT, retained);
 
-    auto result = find_leaf_page(key, Operation::INSERT, transaction);
-    auto leaf = std::move(result.first);
+    PageLatchGuard leaf_latch(leaf->page, true, adopt_latch);
 
-    // RAII write-latch: released on scope exit even if split/insert_into_parent throws
-    PageLatchGuard leaf_latch(leaf->page, true);
     leaf->insert(key, value);
     page_id_t leaf_page_no = leaf->get_page_no();
 
@@ -378,9 +427,21 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
         if (file_hdr_->last_leaf_ == leaf->get_page_no()) {
             file_hdr_->last_leaf_ = new_leaf->get_page_no();
         }
-        insert_into_parent(leaf.get(), new_leaf->get_key(0), new_leaf.get(), transaction);
+        IxNodeHandle *ret_parent = nullptr;
+        if (!retained.empty()) {
+            ret_parent = retained.back().get();
+        }
+        insert_into_parent(leaf.get(), new_leaf->get_key(0), new_leaf.get(),
+                          transaction, ret_parent);
+        // insert_into_parent adopted and released the retained parent's wlock.
+        // Just pop it from the retained list (lock already released).
+        if (!retained.empty()) {
+            retained.pop_back();
+        }
         new_leaf.set_dirty(true);
     }
+
+    for (auto &anc : retained) anc->page->wunlock();
 
     leaf.set_dirty(true);
     return leaf_page_no;
@@ -392,14 +453,12 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
  * @param transaction 事务指针
  */
 bool IxIndexHandle::delete_entry(const char *key, Transaction *transaction) {
-    // Serialize all index modifications
-    std::lock_guard<std::mutex> guard(root_latch_);
-
+    // Crab-locking: leaf is returned with wlock already held.
     auto result = find_leaf_page(key, Operation::DELETE, transaction);
     auto leaf = std::move(result.first);
 
-    // RAII write-latch: released on scope exit even if coalesce/redistribute throws
-    PageLatchGuard leaf_latch(leaf->page, true);
+    // adopt the wlock already held by find_leaf_page
+    PageLatchGuard leaf_latch(leaf->page, true, adopt_latch);
     int old_size = leaf->get_size();
     leaf->remove(key);
     if (leaf->get_size() == old_size) {
