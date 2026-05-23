@@ -189,36 +189,44 @@ std::pair<NodeHandleGuard, bool> IxIndexHandle::find_leaf_page(const char *key, 
     auto node = fetch_node(page_no);
 
     if (operation == Operation::FIND) {
-        // ---- Lock-free optimistic traversal of internal nodes ----
-        // Use version-sequence validation instead of rlock.  Each internal
-        // node is read without any latch; we verify the sequence before and
-        // after.  A mismatch means a concurrent split changed the pointers,
-        // so we restart from the root.
-        for (int attempt = 0; attempt < 3; ++attempt) {
+        // ---- Lock-free optimistic traversal with adaptive fallback ----
+        // Try lock-free up to 5 times.  Each failure means a concurrent
+        // split changed an internal node's pointers mid-read.  After 5
+        // failures, fall back to the SpinLatch rlock path which guarantees
+        // forward progress (pure user-space CAS, no kernel calls).
+        int restart_count = 0;
+        for (int attempt = 0; attempt < 10; ++attempt) {
             page_id_t root_pn = file_hdr_->root_page_;
             auto curr = fetch_node(root_pn);
             uint64_t seq = curr->page->GetLatch().GetSequence();
-            if (seq & 1) continue;  // writer active → retry
+
+            // Writer active on root — brief pause, don't count as failure
+            if (seq & 1) { _mm_pause(); continue; }
 
             while (!curr->is_leaf_page()) {
-                // Read child pointer (no lock)
                 page_id_t child_pn = curr->internal_lookup(key);
-                // Validate: sequence unchanged since we read the child pointer
                 if (curr->page->GetLatch().GetSequence() != seq) {
-                    goto retry_lockfree;
+                    ++restart_count;
+                    if (restart_count > 5) goto fallback_rlock;
+                    goto retry_attempt;
                 }
                 auto child = fetch_node(child_pn);
                 curr = std::move(child);
                 seq = curr->page->GetLatch().GetSequence();
-                if (seq & 1) goto retry_lockfree;
+                if (seq & 1) {
+                    ++restart_count;
+                    if (restart_count > 5) goto fallback_rlock;
+                    goto retry_attempt;
+                }
             }
             // Reached leaf — acquire rlock for safe data access
             curr->page->rlock();
             return std::make_pair(std::move(curr), false);
-        retry_lockfree:;
+        retry_attempt:;
         }
 
-        // Fallback: hand-over-hand rlock (SpinLatch — fast user-space)
+    fallback_rlock:
+        // Hand-over-hand rlock (SpinLatch — fast CAS, guaranteed progress)
         {
             page_id_t page_no = file_hdr_->root_page_;
             auto node = fetch_node(page_no);
