@@ -189,7 +189,8 @@ static void process_query(int conn_fd, const std::string &stmt_str) {
     Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr,
                                    data_send, &offset);
     context->txn_mgr_ = txn_manager.get();
-    context->txn_ = txn_manager->get_transaction(txn_id);
+    auto sp_txn = txn_manager->get_transaction(txn_id);
+    context->txn_ = sp_txn.get();
 
     bool finish_analyze = false;
 

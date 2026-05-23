@@ -14,7 +14,7 @@ See the Mulan PSL v2 for more details. */
 #include "record/rm_file_handle.h"
 #include "system/sm_manager.h"
 
-std::unordered_map<txn_id_t, Transaction *> TransactionManager::txn_map = {};
+std::unordered_map<txn_id_t, std::shared_ptr<Transaction>> TransactionManager::txn_map = {};
 
 /**
  * @description: 事务的开始方法
@@ -23,9 +23,15 @@ std::unordered_map<txn_id_t, Transaction *> TransactionManager::txn_map = {};
  * @param {LogManager*} log_manager 日志管理器指针
  */
 Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manager) {
+    std::shared_ptr<Transaction> sp_txn;
     if (txn == nullptr) {
         txn_id_t txn_id = next_txn_id_++;
-        txn = new Transaction(txn_id);
+        sp_txn = std::make_shared<Transaction>(txn_id);
+        txn = sp_txn.get();
+    } else {
+        // Reusing existing transaction — wrap in a non-owning shared_ptr?
+        // In practice, begin(nullptr) is always called, so this is the fresh path.
+        sp_txn = std::shared_ptr<Transaction>(txn, [](Transaction*){});  // no-op deleter
     }
     txn->set_state(TransactionState::GROWING);
 
@@ -52,7 +58,7 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
     }
 
     std::scoped_lock lock(latch_);
-    TransactionManager::txn_map[txn->get_transaction_id()] = txn;
+    TransactionManager::txn_map[txn->get_transaction_id()] = sp_txn;
 
     auto* begin_log = new BeginLogRecord(txn->get_transaction_id());
     lsn_t lsn = log_manager->add_log_to_buffer(begin_log);
@@ -243,7 +249,9 @@ std::optional<UndoLog> TransactionManager::GetUndoLogOptional(UndoLink link) {
     if (it == TransactionManager::txn_map.end()) {
         return std::nullopt;
     }
-    return it->second->GetUndoLog(link.prev_log_idx_);
+    // Hold shared_ptr to prevent GC from deleting this txn mid-access
+    auto sp = it->second;
+    return sp->GetUndoLog(link.prev_log_idx_);
 }
 
 UndoLog TransactionManager::GetUndoLog(UndoLink link) {
@@ -270,20 +278,25 @@ void TransactionManager::GarbageCollection() {
     {
         std::scoped_lock lock(latch_);
 
-        std::vector<std::pair<txn_id_t, Transaction*>> to_erase;
+        std::vector<txn_id_t> to_erase;
         for (auto& [txn_id, txn] : TransactionManager::txn_map) {
             auto state = txn->get_state();
             if (state == TransactionState::COMMITTED || state == TransactionState::ABORTED) {
                 if (txn->get_commit_ts() < watermark) {
-                    to_erase.emplace_back(txn_id, txn);
+                    // Only erase if no other thread holds a reference via get_transaction().
+                    // If use_count > 1, a concurrent reader is still using this txn;
+                    // defer deletion to the next GC cycle.
+                    if (txn.use_count() == 1) {
+                        to_erase.push_back(txn_id);
+                    }
                 }
             }
         }
 
-        for (auto& [txn_id, txn] : to_erase) {
+        for (auto& txn_id : to_erase) {
             TransactionManager::txn_map.erase(txn_id);
             deleted_ids.insert(txn_id);
-            delete txn;  // free Transaction + undo_logs_ vector
+            // shared_ptr destructor automatically frees Transaction
         }
     }
 

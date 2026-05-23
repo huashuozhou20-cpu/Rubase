@@ -74,7 +74,7 @@ public:
      * @return {Transaction*} 事务对象的指针
      * @param {txn_id_t} txn_id 事务ID
      */    
-    Transaction* get_transaction(txn_id_t txn_id) {
+    std::shared_ptr<Transaction> get_transaction(txn_id_t txn_id) {
         if(txn_id == INVALID_TXN_ID) return nullptr;
 
         std::unique_lock<std::mutex> lock(latch_);
@@ -82,15 +82,16 @@ public:
         if (it == TransactionManager::txn_map.end()) {
             return nullptr;
         }
-        auto *res = it->second;
+        auto res = it->second;
         lock.unlock();
         assert(res != nullptr);
-        assert(res->get_thread_id() == std::this_thread::get_id());
+        // thread-id check removed — epoll workers may legitimately access
+        // a transaction created by a different worker thread.
 
         return res;
     }
 
-    static std::unordered_map<txn_id_t, Transaction *> txn_map;     // 全局事务表，存放事务ID与事务对象的映射关系
+    static std::unordered_map<txn_id_t, std::shared_ptr<Transaction>> txn_map;
     std::shared_mutex txn_map_mutex_;
     /** ------------------------以下函数仅可能在MVCC当中使用------------------------------------------*/
 
