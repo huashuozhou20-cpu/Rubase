@@ -25,7 +25,9 @@ See the Mulan PSL v2 for more details. */
 #include "portal.h"
 #include "analyze/analyze.h"
 #include "execution/executor_abstract.h"
+#ifdef ENABLE_PROFILING
 #include "common/sampler.h"
+#endif
 #include "network/epoll_server.h"
 
 #define DEFAULT_PORT 8765
@@ -56,7 +58,9 @@ static pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 static EpollServer *g_server = nullptr;
 
 static void sigint_handler(int /*signo*/) {
+#ifdef ENABLE_PROFILING
     Sampler::stop();
+#endif
     log_manager->flush_log_to_disk();
     std::cout << "The Server received Ctrl+C, will be closed\n";
     if (g_server) g_server->stop();
@@ -338,8 +342,10 @@ int main(int argc, char **argv) {
         EpollServer server(port, process_query, num_workers);
         g_server = &server;
 
+#ifdef ENABLE_PROFILING
         // Start CPU profiler after all initialization is complete
         Sampler::start("/tmp/rmdb_samples.bin");
+#endif
 
         server.run();
         g_server = nullptr;
