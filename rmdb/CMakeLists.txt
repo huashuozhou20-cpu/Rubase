@@ -12,8 +12,11 @@ set(CMAKE_CXX_FLAGS "-Wall -O2 -g -ggdb3")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0 -g")
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
-set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native -flto")
+set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -march=native -flto")
+# LTO requires link-time flags too
+set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-flto")
+set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-flto")
 
 # AddressSanitizer — enabled via -DENABLE_ASAN=ON
 option(ENABLE_ASAN "Build with AddressSanitizer" OFF)
@@ -24,6 +27,20 @@ if(ENABLE_ASAN)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ASAN_FLAGS}")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
+endif()
+
+# ThreadSanitizer — enabled via -DENABLE_TSAN=ON
+# Detects data races on the epoll worker pool, Connection::busy flag,
+# BufferPoolManager async flushes, and all shared state accesses.
+# NOTE: TSAN is incompatible with ASAN; enable only one at a time.
+option(ENABLE_TSAN "Build with ThreadSanitizer" OFF)
+if(ENABLE_TSAN)
+    message(STATUS "ThreadSanitizer ENABLED")
+    set(TSAN_FLAGS "-fsanitize=thread -fno-omit-frame-pointer -g -O1")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TSAN_FLAGS}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TSAN_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=thread")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=thread")
 endif()
 
 enable_testing()

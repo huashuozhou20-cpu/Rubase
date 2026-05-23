@@ -60,6 +60,32 @@ timeout 30 sysbench tools/sysbench_rmdb.lua --threads=8 --time=15 \
     --report-interval=5 --rand-type=special run 2>&1 | tee -a $R
 echo "server-errors: $(grep -c 'Error\|Segfault' /tmp/rmdb8.log 2>/dev/null || echo 0)" | tee -a $R
 
+# ---- sysbench 16 threads ----
+echo ">>> sysbench 16 threads" | tee -a $R
+pkill -9 rmdb sysbench 2>/dev/null; sleep 1
+rm -rf /tmp/rmdb_test16
+PORT=18792
+./build/bin/rmdb /tmp/rmdb_test16 $PORT &>/tmp/rmdb16.log &
+sleep 2
+export RMDB_HOST="127.0.0.1" RMDB_PORT="$PORT"
+sysbench tools/sysbench_rmdb.lua --threads=1 prepare 2>&1 | tail -1 | tee -a $R
+timeout 30 sysbench tools/sysbench_rmdb.lua --threads=16 --time=15 \
+    --report-interval=5 --rand-type=special run 2>&1 | tee -a $R
+echo "server-errors: $(grep -c 'Error\|Segfault' /tmp/rmdb16.log 2>/dev/null || echo 0)" | tee -a $R
+
+# ---- sysbench 32 threads ----
+echo ">>> sysbench 32 threads" | tee -a $R
+pkill -9 rmdb sysbench 2>/dev/null; sleep 1
+rm -rf /tmp/rmdb_test32
+PORT=18793
+./build/bin/rmdb /tmp/rmdb_test32 $PORT &>/tmp/rmdb32.log &
+sleep 2
+export RMDB_HOST="127.0.0.1" RMDB_PORT="$PORT"
+sysbench tools/sysbench_rmdb.lua --threads=1 prepare 2>&1 | tail -1 | tee -a $R
+timeout 30 sysbench tools/sysbench_rmdb.lua --threads=32 --time=15 \
+    --report-interval=5 --rand-type=special run 2>&1 | tee -a $R
+echo "server-errors: $(grep -c 'Error\|Segfault' /tmp/rmdb32.log 2>/dev/null || echo 0)" | tee -a $R
+
 # ---- push ----
 echo ">>> push results" | tee -a $R
 pkill -9 rmdb sysbench 2>/dev/null
