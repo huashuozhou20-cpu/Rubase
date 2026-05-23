@@ -376,7 +376,8 @@ public:
 /* 日志管理器，负责把日志写入日志缓冲区，以及把日志缓冲区中的内容写入磁盘中 */
 class LogManager {
 public:
-    LogManager(DiskManager* disk_manager) : persist_lsn_(INVALID_LSN), disk_manager_(disk_manager) {
+    LogManager(DiskManager* disk_manager) : disk_manager_(disk_manager) {
+        persist_lsn_.store(INVALID_LSN, std::memory_order_relaxed);
         if (enable_logging) {
             start_flush_thread();
         }
@@ -402,7 +403,7 @@ private:
     std::atomic<lsn_t> global_lsn_{0};  // 全局lsn，递增，用于为每条记录分发lsn
     std::mutex latch_;                  // 用于对log_buffer_的互斥访问
     LogBuffer log_buffer_;              // 日志缓冲区
-    lsn_t persist_lsn_;                 // 记录已经持久化到磁盘中的最后一条日志的日志号
+    std::atomic<lsn_t> persist_lsn_{INVALID_LSN};  // 已持久化的最后一条日志号 (atomic for lock-free read)
     DiskManager* disk_manager_;
 
     // Group commit (Leader-Follower)

@@ -39,7 +39,7 @@ lsn_t LogManager::add_log_to_buffer(LogRecord* log_record) {
         } else {
             log_buffer_.offset_ = 0;
         }
-        persist_lsn_ = lsn - 1;
+        persist_lsn_.store(lsn - 1, std::memory_order_release);
         persist_cv_.notify_all();
     }
     log_record->serialize(log_buffer_.buffer_ + log_buffer_.offset_);
@@ -89,7 +89,7 @@ void LogManager::flush_log_to_disk() {
 
     // 重新获取锁，更新持久化位点，唤醒 Followers
     lock.lock();
-    persist_lsn_ = flushed_up_to;  // 使用捕获的精确值，避免并发追加导致 inflate
+    persist_lsn_.store(flushed_up_to, std::memory_order_release);
     is_flushing_ = false;
     group_commit_cv_.notify_all();
     persist_cv_.notify_all();
@@ -115,12 +115,18 @@ void LogManager::start_flush_thread() {
 }
 
 void LogManager::wait_for_persist_lsn(lsn_t target) {
-    // Must hold latch_ before reading persist_lsn_ — otherwise a
-    // notify_all from flush_log_to_disk() between the spin check
-    // and cv.wait() is lost (classic lost-wakeup).
+    // Fast path: spin briefly on the atomic persist_lsn_ (no lock needed).
+    // If the background flusher just advanced it, we return without any
+    // mutex or CV overhead.
+    for (int spin = 0; spin < 100; ++spin) {
+        if (persist_lsn_.load(std::memory_order_acquire) >= target) return;
+        _mm_pause();
+    }
+    // Slow path: cv sleep.  The predicate re-checks under latch_ so a
+    // notify_all between the spin and cv.wait is correctly handled.
     std::unique_lock<std::mutex> lock(latch_);
     persist_cv_.wait(lock, [this, target] {
-        return persist_lsn_ >= target;
+        return persist_lsn_.load(std::memory_order_relaxed) >= target;
     });
 }
 
