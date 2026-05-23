@@ -412,6 +412,7 @@ private:
     std::mutex io_latch_;                              // 保护磁盘 I/O，防止 Leader 与溢出刷盘竞态
     char flush_buffer_[LOG_BUFFER_SIZE + 1];
     int flush_offset_{0};
+    char overflow_buffer_[LOG_BUFFER_SIZE + 1];        // 专用于 add_log_to_buffer 溢出，避免与 flush_buffer_ 竞态
 
     // Background flush thread
     std::thread flush_thread_;

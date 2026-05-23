@@ -12,22 +12,33 @@ See the Mulan PSL v2 for more details. */
 #include "log_manager.h"
 
 /**
- * @description: 添加日志记录到日志缓冲区中，并返回日志记录号
+ * @description: 添加日志记录到日志缓冲区中，并返回日志记录号。
+ *               缓冲区满时拷贝到专用溢出缓冲区，释放锁后执行磁盘 I/O，
+ *               避免持有 latch_ 期间做 fdatasync 阻塞其他线程追加日志。
  * @param {LogRecord*} log_record 要写入缓冲区的日志记录
  * @return {lsn_t} 返回该日志的日志记录号
  */
 lsn_t LogManager::add_log_to_buffer(LogRecord* log_record) {
-    std::scoped_lock lock(latch_);
+    std::unique_lock<std::mutex> lock(latch_);
     lsn_t lsn = global_lsn_++;
     log_record->lsn_ = lsn;
     int log_len = log_record->log_tot_len_;
     if (log_buffer_.is_full(log_len)) {
         if (log_buffer_.offset_ > 0) {
-            std::scoped_lock io_lock(io_latch_);
-            disk_manager_->write_log(log_buffer_.buffer_, log_buffer_.offset_);
+            // 拷贝到专用溢出缓冲区，释放 latch_ 后再做 I/O
+            memcpy(overflow_buffer_, log_buffer_.buffer_, log_buffer_.offset_);
+            int overflow_len = log_buffer_.offset_;
+            log_buffer_.offset_ = 0;
+            lock.unlock();
+            {
+                std::scoped_lock io_lock(io_latch_);
+                disk_manager_->write_log(overflow_buffer_, overflow_len);
+            }
+            lock.lock();
+        } else {
+            log_buffer_.offset_ = 0;
         }
         persist_lsn_ = lsn - 1;
-        log_buffer_.offset_ = 0;
         persist_cv_.notify_all();
     }
     log_record->serialize(log_buffer_.buffer_ + log_buffer_.offset_);

@@ -31,7 +31,7 @@ See the Mulan PSL v2 for more details. */
 // Number of independent shards.  Each shard owns a private latch, LRU
 // replacer, page table and free list — eliminating the global-lock
 // bottleneck under mixed read/write workloads.
-static constexpr size_t BPM_SHARD_COUNT = 8;
+static constexpr size_t BPM_SHARD_COUNT = 16;
 
 /**
  * BufferPoolShard — one independent partition of the buffer pool.
