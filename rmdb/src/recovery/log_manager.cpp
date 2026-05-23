@@ -115,15 +115,9 @@ void LogManager::start_flush_thread() {
 }
 
 void LogManager::wait_for_persist_lsn(lsn_t target) {
-    // Spin-yield hybrid wait: poll persist_lsn_ in user-space briefly
-    // before entering the kernel via condition_variable.  If the
-    // background flusher just advanced persist_lsn_, we catch it here
-    // without a context switch.
-    for (int spin = 0; spin < 10; ++spin) {
-        if (persist_lsn_ >= target) return;
-        _mm_pause();
-    }
-    // Fall back to cv sleep for longer waits
+    // Must hold latch_ before reading persist_lsn_ — otherwise a
+    // notify_all from flush_log_to_disk() between the spin check
+    // and cv.wait() is lost (classic lost-wakeup).
     std::unique_lock<std::mutex> lock(latch_);
     persist_cv_.wait(lock, [this, target] {
         return persist_lsn_ >= target;
