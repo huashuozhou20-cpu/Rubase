@@ -17,22 +17,31 @@ free -h | grep Mem | tee -a $R
 
 # ---- build ----
 echo ">>> build release" | tee -a $R
-mkdir -p build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Release .. 2>&1 | tail -3 | tee -a $R
+mkdir -p build && cd build
+if ! cmake -DCMAKE_BUILD_TYPE=Release .. 2>&1 | tail -3 | tee -a $R; then
+    echo "BUILD FAILED - missing deps? Run: sudo apt install -y build-essential cmake g++ libreadline-dev" | tee -a $R
+    exit 1
+fi
 make -j$(nproc) 2>&1 | tail -5 | tee -a $R
 cd ..
 
 # ---- unit test ----
 echo ">>> unit test" | tee -a $R
-./build/bin/unit_test 2>&1 | grep -E "PASSED|FAILED" | tee -a $R
+if [ -x ./build/bin/unit_test ]; then
+    ./build/bin/unit_test 2>&1 | grep -E "PASSED|FAILED" | tee -a $R
+else
+    echo "BUILD FAILED - no binary" | tee -a $R
+    exit 1
+fi
 
 # ---- sysbench 4 threads ----
 echo ">>> sysbench 4 threads" | tee -a $R
 pkill -9 rmdb sysbench 2>/dev/null; sleep 1
 rm -rf /tmp/rmdb_test
-./build/bin/rmdb /tmp/rmdb_test 18790 &>/tmp/rmdb.log &
+PORT=18790
+./build/bin/rmdb /tmp/rmdb_test $PORT &>/tmp/rmdb.log &
 sleep 2
+export RMDB_HOST="127.0.0.1" RMDB_PORT="$PORT"
 sysbench tools/sysbench_rmdb.lua --threads=1 prepare 2>&1 | tail -1 | tee -a $R
 timeout 30 sysbench tools/sysbench_rmdb.lua --threads=4 --time=15 \
     --report-interval=5 --rand-type=special run 2>&1 | tee -a $R
@@ -42,8 +51,10 @@ echo "server-errors: $(grep -c 'Error\|Segfault' /tmp/rmdb.log 2>/dev/null || ec
 echo ">>> sysbench 8 threads" | tee -a $R
 pkill -9 rmdb sysbench 2>/dev/null; sleep 1
 rm -rf /tmp/rmdb_test8
-./build/bin/rmdb /tmp/rmdb_test8 18791 &>/tmp/rmdb8.log &
+PORT=18791
+./build/bin/rmdb /tmp/rmdb_test8 $PORT &>/tmp/rmdb8.log &
 sleep 2
+export RMDB_HOST="127.0.0.1" RMDB_PORT="$PORT"
 sysbench tools/sysbench_rmdb.lua --threads=1 prepare 2>&1 | tail -1 | tee -a $R
 timeout 30 sysbench tools/sysbench_rmdb.lua --threads=8 --time=15 \
     --report-interval=5 --rand-type=special run 2>&1 | tee -a $R
