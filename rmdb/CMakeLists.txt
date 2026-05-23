@@ -43,6 +43,13 @@ if(ENABLE_TSAN)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=thread")
 endif()
 
+# Memory-only mode: disable fdatasync to measure true CPU ceiling
+option(DISABLE_FSYNC "Build without fdatasync (memory-only benchmark)" OFF)
+if(DISABLE_FSYNC)
+    message(STATUS "DISABLE_FSYNC: fdatasync stripped — memory-only mode")
+    add_compile_definitions(DISABLE_FSYNC)
+endif()
+
 enable_testing()
 add_subdirectory(src)
 add_subdirectory(deps)

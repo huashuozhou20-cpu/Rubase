@@ -277,7 +277,9 @@ void DiskManager::write_log(char *log_data, int size) {
     if (bytes_write != size) {
         throw UnixError();
     }
+#ifndef DISABLE_FSYNC
     fdatasync(log_fd_);
+#endif
 }
 
 void DiskManager::truncate_log() {

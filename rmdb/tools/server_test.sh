@@ -86,6 +86,26 @@ timeout 30 sysbench tools/sysbench_rmdb.lua --threads=32 --time=15 \
     --report-interval=5 --rand-type=special run 2>&1 | tee -a $R
 echo "server-errors: $(grep -c 'Error\|Segfault' /tmp/rmdb32.log 2>/dev/null || echo 0)" | tee -a $R
 
+# ---- memory-only build (no fdatasync) ----
+echo ">>> memory-only build (DISABLE_FSYNC)" | tee -a $R
+mkdir -p build_nofsync && cd build_nofsync
+cmake -DCMAKE_BUILD_TYPE=Release -DDISABLE_FSYNC=ON .. 2>&1 | tail -1 | tee -a $R
+make -j$(nproc) 2>&1 | tail -3 | tee -a $R
+cd ..
+
+# ---- memory-only 4 threads ----
+echo ">>> memory-only 4 threads" | tee -a $R
+pkill -9 rmdb sysbench 2>/dev/null; sleep 1
+rm -rf /tmp/rmdb_mem
+PORT=18795
+./build_nofsync/bin/rmdb /tmp/rmdb_mem $PORT &>/tmp/rmdb_mem.log &
+sleep 2
+export RMDB_HOST="127.0.0.1" RMDB_PORT="$PORT"
+sysbench tools/sysbench_rmdb.lua --threads=1 prepare 2>&1 | tail -1 | tee -a $R
+timeout 30 sysbench tools/sysbench_rmdb.lua --threads=4 --time=15 \
+    --report-interval=5 --rand-type=special run 2>&1 | tee -a $R
+echo "server-errors: $(grep -c 'Error\|Segfault' /tmp/rmdb_mem.log 2>/dev/null || echo 0)" | tee -a $R
+
 # ---- push ----
 echo ">>> push results" | tee -a $R
 pkill -9 rmdb sysbench 2>/dev/null
