@@ -1,0 +1,91 @@
+=== Sat May 23 07:53:16 PM CST 2026 ===
+>>> git pull
+From github.com:huashuozhou20-cpu/Rubase
+ * branch            main       -> FETCH_HEAD
+Already up to date.
+>>> system info
+host=iZuf6ig58ffzu9up0f2hjoZ cpu=4 commit=7d7ccf2 tools: fix server_test.sh — export RMDB_PORT, check build before proceed
+Linux iZuf6ig58ffzu9up0f2hjoZ 5.15.0-177-generic #187-Ubuntu SMP Sat Apr 11 22:54:33 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+Mem:           3.4Gi       825Mi       834Mi       2.0Mi       1.8Gi       2.3Gi
+>>> build release
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/obuser/Rubase/rmdb/build
+[ 91%] Built target parser
+Consolidate compiler generated dependencies of target test_parser
+Consolidate compiler generated dependencies of target rmdb
+[ 94%] Built target test_parser
+[100%] Built target rmdb
+>>> unit test
+[  PASSED  ] 5 tests.
+>>> sysbench 4 threads
+  [prepare] Inserting 1000 baseline rows ...
+sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
+
+Running the test with following options:
+Number of threads: 4
+Report intermediate results every 5 second(s)
+Initializing random number generator from current time
+
+
+Initializing worker threads...
+
+Threads started!
+
+[ 5s ] thds: 4 eps: 1670.07 lat (ms,95%): 2.57
+[ 10s ] thds: 4 eps: 1671.25 lat (ms,95%): 2.52
+[ 15s ] thds: 4 eps: 1671.20 lat (ms,95%): 2.57
+
+General statistics:
+    total time:                          15.0022s
+    total number of events:              25068
+
+Latency (ms):
+         min:                                    0.72
+         avg:                                    2.39
+         max:                                    3.65
+         95th percentile:                        2.57
+         sum:                                59995.22
+
+Threads fairness:
+    events (avg/stddev):           6267.0000/0.00
+    execution time (avg/stddev):   14.9988/0.00
+
+server-errors: 0
+0
+>>> sysbench 8 threads
+  [prepare] Inserting 1000 baseline rows ...
+sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
+
+Running the test with following options:
+Number of threads: 8
+Report intermediate results every 5 second(s)
+Initializing random number generator from current time
+
+
+Initializing worker threads...
+
+Threads started!
+
+[ 5s ] thds: 8 eps: 1671.63 lat (ms,95%): 5.00
+[ 10s ] thds: 8 eps: 1670.49 lat (ms,95%): 5.00
+[ 15s ] thds: 8 eps: 1671.19 lat (ms,95%): 5.00
+
+General statistics:
+    total time:                          15.0035s
+    total number of events:              25076
+
+Latency (ms):
+         min:                                    0.59
+         avg:                                    4.79
+         max:                                    5.66
+         95th percentile:                        5.00
+         sum:                               120001.93
+
+Threads fairness:
+    events (avg/stddev):           3134.5000/0.50
+    execution time (avg/stddev):   15.0002/0.00
+
+server-errors: 0
+0
+>>> push results
