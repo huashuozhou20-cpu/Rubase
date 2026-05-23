@@ -1,20 +1,27 @@
-=== Sat May 23 10:27:16 PM CST 2026 ===
+=== Sat May 23 10:42:15 PM CST 2026 ===
 >>> git pull
 From github.com:huashuozhou20-cpu/Rubase
  * branch            main       -> FETCH_HEAD
-Already up to date.
+   716cf43..3873444  main       -> origin/main
+Updating 716cf43..3873444
+Fast-forward
+ rmdb/CMakeLists.txt               |  7 +++++++
+ rmdb/src/common/config.cpp        |  2 +-
+ rmdb/src/storage/disk_manager.cpp |  2 ++
+ rmdb/tools/server_test.sh         | 20 ++++++++++++++++++++
+ 4 files changed, 30 insertions(+), 1 deletion(-)
 >>> system info
-host=iZuf6ig58ffzu9up0f2hjoZ cpu=4 commit=bd47436 test: server 05-23 21:47
+host=iZuf6ig58ffzu9up0f2hjoZ cpu=4 commit=3873444 perf: log_timeout 3ms, add DISABLE_FSYNC memory-only benchmark mode
 Linux iZuf6ig58ffzu9up0f2hjoZ 5.15.0-177-generic #187-Ubuntu SMP Sat Apr 11 22:54:33 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
-Mem:           3.4Gi       254Mi       3.0Gi       2.0Mi       129Mi       3.0Gi
+Mem:           3.4Gi       269Mi       2.6Gi       2.0Mi       559Mi       2.9Gi
 >>> build release
 -- Configuring done
 -- Generating done
 -- Build files have been written to: /home/obuser/Rubase/rmdb/build
-[ 96%] Linking CXX executable ../bin/rmdb
+lto-wrapper: warning: using serial compilation of 7 LTRANS jobs
 lto-wrapper: warning: using serial compilation of 13 LTRANS jobs
-[ 98%] Built target test_parser
-[ 98%] Built target unit_test
+[ 94%] Built target test_parser
+[ 96%] Built target unit_test
 [100%] Built target rmdb
 >>> unit test
 [  PASSED  ] 5 tests.
@@ -32,24 +39,24 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 4 eps: 1170.95 lat (ms,95%): 3.96
-[ 10s ] thds: 4 eps: 1167.26 lat (ms,95%): 3.96
-[ 15s ] thds: 4 eps: 1164.01 lat (ms,95%): 3.96
+[ 5s ] thds: 4 eps: 903.22 lat (ms,95%): 4.91
+[ 10s ] thds: 4 eps: 907.23 lat (ms,95%): 4.91
+[ 15s ] thds: 4 eps: 907.20 lat (ms,95%): 4.91
 
 General statistics:
-    total time:                          15.0027s
-    total number of events:              17516
+    total time:                          15.0014s
+    total number of events:              13593
 
 Latency (ms):
-         min:                                    0.13
-         avg:                                    3.43
-         max:                                   11.71
-         95th percentile:                        3.96
-         sum:                                59998.37
+         min:                                    0.12
+         avg:                                    4.41
+         max:                                    7.68
+         95th percentile:                        4.91
+         sum:                                59994.97
 
 Threads fairness:
-    events (avg/stddev):           4379.0000/0.00
-    execution time (avg/stddev):   14.9996/0.00
+    events (avg/stddev):           3398.2500/0.43
+    execution time (avg/stddev):   14.9987/0.00
 
 server-errors: 0
 0
@@ -67,24 +74,24 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 8 eps: 1166.59 lat (ms,95%): 7.43
-[ 10s ] thds: 8 eps: 1172.84 lat (ms,95%): 7.43
-[ 15s ] thds: 7 eps: 1170.41 lat (ms,95%): 7.43
+[ 5s ] thds: 8 eps: 909.42 lat (ms,95%): 9.39
+[ 10s ] thds: 8 eps: 908.84 lat (ms,95%): 9.39
+[ 15s ] thds: 8 eps: 907.20 lat (ms,95%): 9.39
 
 General statistics:
-    total time:                          15.0042s
-    total number of events:              17555
+    total time:                          15.0060s
+    total number of events:              13636
 
 Latency (ms):
-         min:                                    0.13
-         avg:                                    6.84
-         max:                                   18.41
-         95th percentile:                        7.43
-         sum:                               120002.24
+         min:                                    0.77
+         avg:                                    8.80
+         max:                                   17.66
+         95th percentile:                        9.39
+         sum:                               120019.14
 
 Threads fairness:
-    events (avg/stddev):           2194.3750/0.86
-    execution time (avg/stddev):   15.0003/0.00
+    events (avg/stddev):           1704.5000/0.50
+    execution time (avg/stddev):   15.0024/0.00
 
 server-errors: 0
 0
@@ -102,24 +109,24 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 16 eps: 1171.77 lat (ms,95%): 14.21
-[ 10s ] thds: 16 eps: 1171.24 lat (ms,95%): 14.46
-[ 15s ] thds: 16 eps: 1169.60 lat (ms,95%): 14.21
+[ 5s ] thds: 16 eps: 908.82 lat (ms,95%): 18.28
+[ 10s ] thds: 16 eps: 909.63 lat (ms,95%): 18.28
+[ 15s ] thds: 16 eps: 908.01 lat (ms,95%): 18.28
 
 General statistics:
-    total time:                          15.0117s
-    total number of events:              17580
+    total time:                          15.0160s
+    total number of events:              13649
 
 Latency (ms):
-         min:                                    0.74
-         avg:                                   13.66
-         max:                                   32.21
-         95th percentile:                       14.21
-         sum:                               240081.15
+         min:                                    0.14
+         avg:                                   17.59
+         max:                                   21.97
+         95th percentile:                       18.28
+         sum:                               240128.62
 
 Threads fairness:
-    events (avg/stddev):           1098.7500/0.43
-    execution time (avg/stddev):   15.0051/0.00
+    events (avg/stddev):           853.0625/0.66
+    execution time (avg/stddev):   15.0080/0.01
 
 server-errors: 0
 0
@@ -137,24 +144,24 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 32 eps: 1170.14 lat (ms,95%): 28.67
-[ 10s ] thds: 32 eps: 1173.84 lat (ms,95%): 28.16
-[ 15s ] thds: 32 eps: 1170.41 lat (ms,95%): 28.16
+[ 5s ] thds: 32 eps: 909.42 lat (ms,95%): 35.59
+[ 10s ] thds: 32 eps: 907.23 lat (ms,95%): 36.24
+[ 15s ] thds: 32 eps: 908.80 lat (ms,95%): 35.59
 
 General statistics:
-    total time:                          15.0258s
-    total number of events:              17605
+    total time:                          15.0332s
+    total number of events:              13660
 
 Latency (ms):
-         min:                                    0.22
-         avg:                                   27.29
-         max:                                   43.70
-         95th percentile:                       28.16
-         sum:                               480384.93
+         min:                                    1.01
+         avg:                                   35.18
+         max:                                   38.79
+         95th percentile:                       35.59
+         sum:                               480492.05
 
 Threads fairness:
-    events (avg/stddev):           550.1562/0.36
-    execution time (avg/stddev):   15.0120/0.01
+    events (avg/stddev):           426.8750/0.60
+    execution time (avg/stddev):   15.0154/0.01
 
 server-errors: 0
 0
