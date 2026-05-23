@@ -119,7 +119,7 @@ void LogManager::wait_for_persist_lsn(lsn_t target) {
     // before entering the kernel via condition_variable.  If the
     // background flusher just advanced persist_lsn_, we catch it here
     // without a context switch.
-    for (int spin = 0; spin < 100; ++spin) {
+    for (int spin = 0; spin < 10; ++spin) {
         if (persist_lsn_ >= target) return;
         _mm_pause();
     }

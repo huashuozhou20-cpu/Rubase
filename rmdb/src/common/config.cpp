@@ -14,4 +14,4 @@ std::chrono::milliseconds cycle_detection_interval{10};
 
 std::atomic<bool> enable_logging{true};
 
-std::chrono::microseconds log_timeout{500};  // 500 us — aggressive group-commit
+std::chrono::microseconds log_timeout{4000};  // 4 ms — deep batching group-commit
