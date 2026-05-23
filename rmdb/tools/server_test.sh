@@ -1,19 +1,30 @@
 #!/bin/bash
 # ============================================================
 # RuBase 服务端全自动测试 + 结果回传脚本
-#
 # 用法:  bash tools/server_test.sh
-#
-# 流程:  git pull → 编译 → 测试 → 结果写入文件 → git push 回仓库
-# 服务端只需执行这一条命令，开发者拉取仓库即可获取结果
 # ============================================================
-set -e
 cd "$(dirname "$0")/.."
-
-# 结果输出文件（在仓库内，推送后开发者可直接拉取）
 RESULT_FILE="tools/server_results.txt"
 
 section() { echo ""; echo "━━━ $1 ━━━"; }
+
+# ===================================================================
+# 0. 检查依赖
+# ===================================================================
+section "Check Dependencies"
+MISSING=""
+for cmd in cmake g++ make git sysbench python3; do
+    if ! command -v $cmd &>/dev/null; then
+        echo "  MISSING: $cmd"
+        MISSING="$MISSING $cmd"
+    fi
+done
+if [ -n "$MISSING" ]; then
+    echo ""
+    echo "Run: sudo apt update && sudo apt install -y build-essential cmake g++ git sysbench luajit libluajit-5.1-dev python3 libreadline-dev"
+    exit 1
+fi
+echo "  All dependencies OK"
 
 # ===================================================================
 # 1. 拉取最新代码
@@ -38,20 +49,21 @@ echo ""
 } > $RESULT_FILE
 
 # ===================================================================
-# 3. 编译 Release + ASAN
+# 3. 编译
 # ===================================================================
-section "Build"
+section "Build Release"
 mkdir -p build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release .. > /dev/null 2>&1
-make -j$(nproc) 2>&1 | tail -3
-echo "Release build: OK"
+cmake -DCMAKE_BUILD_TYPE=Release .. 2>&1 | tail -1
+make -j$(nproc) 2>&1 | tail -5
 cd ..
+echo "Release build done"
 
+section "Build ASAN"
 mkdir -p build_asan && cd build_asan
-cmake -DENABLE_ASAN=ON .. > /dev/null 2>&1
-make -j$(nproc) 2>&1 | tail -3
-echo "ASAN build: OK"
+cmake -DENABLE_ASAN=ON .. 2>&1 | tail -1
+make -j$(nproc) 2>&1 | tail -5
 cd ..
+echo "ASAN build done"
 
 # ===================================================================
 # 4. 单元测试
@@ -71,7 +83,7 @@ pkill -9 rmdb sysbench 2>/dev/null || true; sleep 0.5
 rm -rf /tmp/rmdb_asan
 ASAN_OPTIONS=detect_leaks=0 ./build_asan/bin/rmdb /tmp/rmdb_asan 18790 &>/tmp/asan_smoke.log &
 sleep 2
-python3 tools/differential_fuzzer.py --seed 42 --queries 100 --port 18790 2>&1 | tail -5
+python3 tools/differential_fuzzer.py --seed 42 --queries 100 --port 18790 2>&1 | tail -5 || echo "  fuzzer skipped"
 pkill -9 rmdb 2>/dev/null || true
 ASAN_ERRS=$(grep -c 'ERROR\|heap-use\|data.race' /tmp/asan_smoke.log 2>/dev/null || echo 0)
 {
@@ -81,7 +93,7 @@ echo ""
 } >> $RESULT_FILE
 
 # ===================================================================
-# 6. Sysbench 基准 (4线程 + 8线程)
+# 6. Sysbench 基准
 # ===================================================================
 for TH in 4 8; do
     section "Sysbench ${TH} threads"
@@ -102,6 +114,7 @@ for TH in 4 8; do
     echo ""
     } >> $RESULT_FILE
 done
+pkill -9 rmdb sysbench 2>/dev/null || true
 
 # ===================================================================
 # 7. 差分模糊器
@@ -112,14 +125,14 @@ rm -rf /tmp/rmdb_fuzz
 ./build/bin/rmdb /tmp/rmdb_fuzz 18793 &>/tmp/rmdb_fuzz.log &
 sleep 2
 {
-echo "=== Differential Fuzzer (200 queries) ==="
-python3 tools/differential_fuzzer.py --seed 789 --queries 200 --port 18793 2>&1 | tail -5
+echo "=== Differential Fuzzer (500 queries) ==="
+python3 tools/differential_fuzzer.py --seed 789 --queries 500 --port 18793 2>&1 | tail -5
 echo ""
 } >> $RESULT_FILE
 pkill -9 rmdb 2>/dev/null || true
 
 # ===================================================================
-# 8. 火焰图 (原生 Linux 上 perf 可用)
+# 8. 火焰图
 # ===================================================================
 section "FlameGraph"
 if command -v perf &>/dev/null; then
@@ -142,12 +155,11 @@ if command -v perf &>/dev/null; then
 else
     echo "FlameGraph: perf not available" >> $RESULT_FILE
 fi
-
-# ===================================================================
-# 9. 清理 + 推送结果回 GitHub
-# ===================================================================
 pkill -9 rmdb sysbench 2>/dev/null || true
 
+# ===================================================================
+# 9. 推送结果
+# ===================================================================
 section "Push Results"
 git add tools/server_results.txt tools/database_perf.svg 2>/dev/null || true
 git commit -m "test: server results $(date '+%Y-%m-%d %H:%M')" 2>/dev/null || true
@@ -155,5 +167,5 @@ git push origin main 2>&1
 
 echo ""
 echo "Done. Results pushed to GitHub."
-echo "Local copy: $RESULT_FILE"
+echo ""
 cat $RESULT_FILE
