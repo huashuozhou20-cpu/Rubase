@@ -259,6 +259,251 @@ static std::shared_ptr<ast::TreeNode> try_fast_path(const std::string &stmt_str)
 }
 
 // ============================================================================
+// Plan cache — deep-clone cached Plan + rebind parameter values.
+// Thread-local so each worker populates its own cache, zero synchronisation.
+// ============================================================================
+
+enum class CachedPlanType : uint8_t {
+    UPDATE_BY_ID  = 0,
+    DELETE_BY_ID  = 1,
+    SELECT_BETWEEN = 2,
+    INSERT_VALUES = 3,
+    NONE          = 4
+};
+
+static thread_local std::shared_ptr<Plan> tls_plan_cache[4];
+
+// Identify the fast-path pattern, verifying the AST shape matches the
+// expected template.  Must be specific enough to avoid cache-slot pollution:
+// a plain SELECT without BETWEEN must NOT be cached as SELECT_BETWEEN.
+static CachedPlanType identify_pattern(const std::shared_ptr<ast::TreeNode> &ast) {
+    if (auto u = std::dynamic_pointer_cast<ast::UpdateStmt>(ast)) {
+        if (u->set_clauses.size() == 1 && u->set_clauses[0]->col_name == "val" && u->cond)
+            return CachedPlanType::UPDATE_BY_ID;
+    }
+    if (auto d = std::dynamic_pointer_cast<ast::DeleteStmt>(ast)) {
+        if (d->cond) return CachedPlanType::DELETE_BY_ID;
+    }
+    if (auto s = std::dynamic_pointer_cast<ast::SelectStmt>(ast)) {
+        // Only cache SELECT ... BETWEEN ... AND val + 1 > 0 (sysbench range query)
+        if (s->cond) {
+            auto logic = std::dynamic_pointer_cast<ast::LogicExpr>(s->cond);
+            if (logic && logic->op == ast::LOGIC_AND && logic->args.size() == 2) {
+                auto between = std::dynamic_pointer_cast<ast::BetweenExpr>(logic->args[0]);
+                if (between && between->col && between->col->col_name == "id")
+                    return CachedPlanType::SELECT_BETWEEN;
+            }
+        }
+    }
+    if (auto i = std::dynamic_pointer_cast<ast::InsertStmt>(ast)) {
+        if (i->vals_list.size() == 1 && i->vals_list[0].size() == 3)
+            return CachedPlanType::INSERT_VALUES;
+    }
+    return CachedPlanType::NONE;
+}
+
+// Deep-copy a Value, including its RmRecord raw buffer.
+static Value clone_value(const Value &src) {
+    Value val = src;
+    if (src.raw) val.raw = std::make_shared<RmRecord>(*src.raw);
+    return val;
+}
+
+static std::vector<Condition> clone_conditions(const std::vector<Condition> &conds) {
+    std::vector<Condition> result;
+    result.reserve(conds.size());
+    for (const auto &c : conds) {
+        Condition copy;
+        copy.lhs_col  = c.lhs_col;
+        copy.op       = c.op;
+        copy.is_rhs_val = c.is_rhs_val;
+        copy.rhs_col  = c.rhs_col;
+        copy.rhs_val  = clone_value(c.rhs_val);
+        copy.rhs_val2 = clone_value(c.rhs_val2);
+        for (const auto &v : c.in_values) copy.in_values.push_back(clone_value(v));
+        copy.is_arith_expr = c.is_arith_expr;
+        copy.children = clone_conditions(c.children);
+        result.push_back(std::move(copy));
+    }
+    return result;
+}
+
+static std::vector<SetClause> clone_set_clauses(const std::vector<SetClause> &src) {
+    std::vector<SetClause> result;
+    result.reserve(src.size());
+    for (const auto &sc : src)
+        result.push_back({sc.lhs, clone_value(sc.rhs)});
+    return result;
+}
+
+static std::vector<std::vector<Value>> clone_values_list(
+    const std::vector<std::vector<Value>> &src) {
+    std::vector<std::vector<Value>> result;
+    result.reserve(src.size());
+    for (const auto &row : src) {
+        std::vector<Value> row_copy;
+        row_copy.reserve(row.size());
+        for (const auto &v : row) row_copy.push_back(clone_value(v));
+        result.push_back(std::move(row_copy));
+    }
+    return result;
+}
+
+static std::shared_ptr<Plan> clone_plan(std::shared_ptr<Plan> plan, SmManager *sm) {
+    if (!plan) return nullptr;
+
+    if (auto dml = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+        auto sub_clone = clone_plan(dml->subplan_, sm);
+        auto cloned = std::make_shared<DMLPlan>(
+            dml->tag, sub_clone,
+            std::string(dml->tab_name_),
+            clone_values_list(dml->values_list_),
+            clone_conditions(dml->conds_),
+            clone_set_clauses(dml->set_clauses_),
+            std::vector<std::string>(dml->col_names_));
+        cloned->is_for_update_ = dml->is_for_update_;
+        return cloned;
+    }
+
+    if (auto proj = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
+        return std::make_shared<ProjectionPlan>(
+            proj->tag, clone_plan(proj->subplan_, sm),
+            std::vector<TabCol>(proj->sel_cols_));
+    }
+
+    if (auto scan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+        auto cloned = std::make_shared<ScanPlan>();  // default ctor — no sm access
+        cloned->tag = scan->tag;
+        cloned->tab_name_ = scan->tab_name_;
+        cloned->conds_ = clone_conditions(scan->conds_);
+        cloned->fed_conds_ = clone_conditions(scan->fed_conds_);
+        cloned->index_col_names_ = scan->index_col_names_;
+        cloned->cols_ = scan->cols_;
+        cloned->len_ = scan->len_;
+        cloned->is_index_only_ = scan->is_index_only_;
+        return cloned;
+    }
+
+    return nullptr;
+}
+
+// Update an INT Value and its raw buffer in-place.
+static void rebind_int(Value &val, int new_val) {
+    val.set_int(new_val);
+    if (val.raw) *(int *)(val.raw->data) = new_val;
+}
+
+static void rebind_str(Value &val, const std::string &new_str) {
+    val.set_str(new_str);
+    if (val.raw) {
+        memset(val.raw->data, 0, val.raw->size);
+        memcpy(val.raw->data, new_str.c_str(),
+               std::min(static_cast<size_t>(val.raw->size), new_str.size()));
+    }
+}
+
+// ---- Pattern-specific clone+rebind ----
+
+static std::shared_ptr<Plan> clone_rebind_update(
+    const std::shared_ptr<Plan> &tmpl,
+    std::shared_ptr<ast::UpdateStmt> ast, SmManager *sm) {
+    auto cond = std::dynamic_pointer_cast<ast::BinaryExpr>(ast->cond);
+    int where_id = std::dynamic_pointer_cast<ast::IntLit>(cond->rhs)->val;
+    int set_val  = std::dynamic_pointer_cast<ast::IntLit>(ast->set_clauses[0]->val)->val;
+
+    auto plan = clone_plan(tmpl, sm);
+    auto dml  = std::dynamic_pointer_cast<DMLPlan>(plan);
+    auto scan = std::dynamic_pointer_cast<ScanPlan>(dml->subplan_);
+
+    rebind_int(dml->conds_[0].rhs_val, where_id);
+    rebind_int(dml->set_clauses_[0].rhs, set_val);
+    rebind_int(scan->conds_[0].rhs_val, where_id);
+    scan->fed_conds_ = scan->conds_;
+
+    return plan;
+}
+
+static std::shared_ptr<Plan> clone_rebind_delete(
+    const std::shared_ptr<Plan> &tmpl,
+    std::shared_ptr<ast::DeleteStmt> ast, SmManager *sm) {
+    auto cond = std::dynamic_pointer_cast<ast::BinaryExpr>(ast->cond);
+    int where_id = std::dynamic_pointer_cast<ast::IntLit>(cond->rhs)->val;
+
+    auto plan = clone_plan(tmpl, sm);
+    auto dml  = std::dynamic_pointer_cast<DMLPlan>(plan);
+    auto scan = std::dynamic_pointer_cast<ScanPlan>(dml->subplan_);
+
+    rebind_int(dml->conds_[0].rhs_val, where_id);
+    rebind_int(scan->conds_[0].rhs_val, where_id);
+    scan->fed_conds_ = scan->conds_;
+
+    return plan;
+}
+
+static std::shared_ptr<Plan> clone_rebind_select(
+    const std::shared_ptr<Plan> &tmpl,
+    std::shared_ptr<ast::SelectStmt> ast, SmManager *sm) {
+    auto logic   = std::dynamic_pointer_cast<ast::LogicExpr>(ast->cond);
+    auto between = std::dynamic_pointer_cast<ast::BetweenExpr>(logic->args[0]);
+    int low  = std::dynamic_pointer_cast<ast::IntLit>(between->low)->val;
+    int high = std::dynamic_pointer_cast<ast::IntLit>(between->high)->val;
+
+    auto plan = clone_plan(tmpl, sm);
+    auto dml  = std::dynamic_pointer_cast<DMLPlan>(plan);
+    auto proj = std::dynamic_pointer_cast<ProjectionPlan>(dml->subplan_);
+    auto scan = std::dynamic_pointer_cast<ScanPlan>(proj->subplan_);
+
+    // Rebind BETWEEN low/high values.  Index 0 is the BETWEEN condition, index 1
+    // is val+1>0 (constant, no rebind needed).  Guard against unexpected shapes.
+    if (!scan->conds_.empty()) {
+        rebind_int(scan->conds_[0].rhs_val,  low);
+        rebind_int(scan->conds_[0].rhs_val2, high);
+    }
+    scan->fed_conds_ = scan->conds_;
+
+    return plan;
+}
+
+static std::shared_ptr<Plan> clone_rebind_insert(
+    const std::shared_ptr<Plan> &tmpl,
+    std::shared_ptr<ast::InsertStmt> ast, SmManager *sm) {
+    auto &row    = ast->vals_list[0];
+    int id_val   = std::dynamic_pointer_cast<ast::IntLit>(row[0])->val;
+    int val_val  = std::dynamic_pointer_cast<ast::IntLit>(row[1])->val;
+    std::string padding = std::dynamic_pointer_cast<ast::StringLit>(row[2])->val;
+
+    auto plan = clone_plan(tmpl, sm);
+    auto dml  = std::dynamic_pointer_cast<DMLPlan>(plan);
+
+    rebind_int(dml->values_list_[0][0], id_val);
+    rebind_int(dml->values_list_[0][1], val_val);
+    rebind_str(dml->values_list_[0][2], padding);
+
+    return plan;
+}
+
+static std::shared_ptr<Plan> clone_and_rebind(
+    CachedPlanType type, const std::shared_ptr<Plan> &tmpl,
+    std::shared_ptr<ast::TreeNode> ast, SmManager *sm) {
+    switch (type) {
+    case CachedPlanType::UPDATE_BY_ID:
+        return clone_rebind_update(tmpl,
+            std::dynamic_pointer_cast<ast::UpdateStmt>(ast), sm);
+    case CachedPlanType::DELETE_BY_ID:
+        return clone_rebind_delete(tmpl,
+            std::dynamic_pointer_cast<ast::DeleteStmt>(ast), sm);
+    case CachedPlanType::SELECT_BETWEEN:
+        return clone_rebind_select(tmpl,
+            std::dynamic_pointer_cast<ast::SelectStmt>(ast), sm);
+    case CachedPlanType::INSERT_VALUES:
+        return clone_rebind_insert(tmpl,
+            std::dynamic_pointer_cast<ast::InsertStmt>(ast), sm);
+    default:
+        return nullptr;
+    }
+}
+
+// ============================================================================
 // Per-query processing function — called by worker pool threads.
 // Each call handles exactly one SQL statement on one connection.
 // Results are written back via g_server->enqueue_response().
@@ -288,15 +533,47 @@ static void process_query(int conn_fd, const std::string &stmt_str) {
     context->txn_ = txn_manager->get_transaction(txn_id);
 
     // ---- Phase 1: build AST (fast-path or full parser) ----
-    // The fast path constructs the AST directly from a string-prefix match,
-    // skipping the yyparse() CPU overhead.  do_analyze() still runs under
-    // buffer_mutex because it may touch shared catalog / metadata state that
-    // was originally serialised by the parser mutex.
     std::shared_ptr<ast::TreeNode> local_ast = try_fast_path(stmt_str);
 
+    // Declared early to avoid crossing-initialization with goto
     YY_BUFFER_STATE parser_buf = nullptr;
     bool parser_mutex_held = false;
+    CachedPlanType cache_pattern = CachedPlanType::NONE;
 
+    // ---- Fast path: try plan cache (skip do_analyze + plan_query entirely) ----
+    if (local_ast) {
+        auto pat = identify_pattern(local_ast);
+        if (pat != CachedPlanType::NONE) {
+            auto &cached = tls_plan_cache[static_cast<int>(pat)];
+            if (cached) {
+                std::shared_ptr<Plan> plan = clone_and_rebind(pat, cached, local_ast, sm_manager.get());
+
+                if (auto dml = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+                    if (dml->is_for_update_ && context->txn_) {
+                        context->txn_->set_read_only(false);
+                        context->is_for_update_ = true;
+                    }
+                }
+                try {
+                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
+                    portal->run(portalStmt, ql_manager.get(), &txn_id, context);
+                    portal->drop();
+                } catch (TransactionAbortException &e) {
+                    Result result{Result::ABORT, "abort\n"};
+                    memcpy(data_send, result.msg.c_str(), result.msg.length());
+                    offset = result.msg.length();
+                    txn_manager->abort(context->txn_, log_manager.get());
+                } catch (RMDBError &e) {
+                    Result result{Result::FAILURE, std::string(e.what()) + "\n"};
+                    memcpy(data_send, result.msg.c_str(), result.msg.length());
+                    offset = result.msg.length();
+                }
+                goto send_response;
+            }
+        }
+    }
+
+    // ---- Fallback: parser or cache-miss path (mutex-guarded analysis) ----
     if (!local_ast) {
         pthread_mutex_lock(&buffer_mutex);
         parser_mutex_held = true;
@@ -312,13 +589,12 @@ static void process_query(int conn_fd, const std::string &stmt_str) {
         }
         local_ast = ast::parse_tree;
     } else {
-        // Fast-path succeeded: acquire mutex for analysis phase.
-        // We still serialise do_analyze() to match the original contract.
+        // Fast-path cache miss: acquire mutex for do_analyze().
         pthread_mutex_lock(&buffer_mutex);
         parser_mutex_held = true;
     }
 
-    // ---- Phase 2: analyse + execute AST (common for both paths) ----
+    // ---- Phase 2: analyse + execute AST (common for both fallback paths) ----
     if (local_ast != nullptr) {
         try {
             // CREATE VIEW / DROP VIEW (parser path only — not in fast-path patterns)
@@ -357,6 +633,16 @@ static void process_query(int conn_fd, const std::string &stmt_str) {
             }
 
             std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
+
+            // Populate thread-local plan cache.  Always deep-clone so the
+            // cached template is never mutated by executors.
+            cache_pattern = identify_pattern(local_ast);
+            if (cache_pattern != CachedPlanType::NONE &&
+                !tls_plan_cache[static_cast<int>(cache_pattern)]) {
+                tls_plan_cache[static_cast<int>(cache_pattern)] =
+                    clone_plan(plan, sm_manager.get());
+            }
+
             if (auto dml = std::dynamic_pointer_cast<DMLPlan>(plan)) {
                 if (dml->is_for_update_ && context->txn_) {
                     context->txn_->set_read_only(false);

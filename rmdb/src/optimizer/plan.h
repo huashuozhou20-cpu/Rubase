@@ -62,6 +62,8 @@ public:
 class ScanPlan : public Plan
 {
     public:
+        ScanPlan() = default;
+
         ScanPlan(PlanTag tag, SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, std::vector<std::string> index_col_names)
         {
             Plan::tag = tag;
