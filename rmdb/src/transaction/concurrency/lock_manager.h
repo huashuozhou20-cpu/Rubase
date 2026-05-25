@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -48,7 +49,10 @@ class LockManager {
     };
 
 public:
-    LockManager() { start_deadlock_detector(); }
+    LockManager() {
+        shards_ = std::make_unique<LockTableShard[]>(LOCK_TABLE_SHARDS);
+        start_deadlock_detector();
+    }
 
     ~LockManager() { stop_deadlock_detector(); }
 
@@ -86,8 +90,26 @@ public:
     void CheckDeadlock();
 
 private:
-    std::mutex latch_;      // 用于锁表的并发
-    std::unordered_map<LockDataId, LockRequestQueue> lock_table_;   // 全局锁表
+    // Sharded lock table: 131071 prime buckets, each with an independent mutex.
+    // A LockDataId maps to exactly one shard via hash % LOCK_TABLE_SHARDS.
+    // Only two threads contending for the same LockDataId serialise; all other
+    // lock/unlock operations proceed in parallel across different shards.
+    // Uses unique_ptr<T[]> (one-time startup allocation, no hot-path overhead)
+    // because std::array<T,N> fails on std::mutex's protected default ctor in
+    // some GCC/libstdc++ configurations.
+    static constexpr int LOCK_TABLE_SHARDS = 131071;
+
+    struct LockTableShard {
+        std::mutex latch_;
+        std::unordered_map<LockDataId, LockRequestQueue> table_;
+    };
+    std::unique_ptr<LockTableShard[]> shards_;
+
+    size_t shard_of(const LockDataId& id) const {
+        return std::hash<int64_t>{}(id.Get()) % LOCK_TABLE_SHARDS;
+    }
+
+    std::mutex victims_mutex_;   // protects victims_ set
 
     bool lock_common(Transaction* txn, const LockDataId& lock_data_id, LockMode lock_mode);
     void update_group_lock_mode(LockRequestQueue& queue);

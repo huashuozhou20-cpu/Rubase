@@ -104,9 +104,10 @@ void LockManager::remove_all_edges(txn_id_t txn) {
 }
 
 bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, LockMode lock_mode) {
-    std::unique_lock<std::mutex> lock(latch_);
+    auto& shard = shards_[shard_of(lock_data_id)];
+    std::unique_lock<std::mutex> lock(shard.latch_);
 
-    auto& queue = lock_table_[lock_data_id];
+    auto& queue = shard.table_[lock_data_id];
     txn_id_t my_id = txn->get_transaction_id();
 
     // Check if this transaction already holds a lock on this item
@@ -174,9 +175,12 @@ bool LockManager::lock_common(Transaction* txn, const LockDataId& lock_data_id, 
         remove_all_edges(my_id);
 
         // Check if background detector marked us as victim
-        if (victims_.count(my_id)) {
-            victims_.erase(my_id);
-            throw TransactionAbortException(my_id, AbortReason::DEADLOCK_PREVENTION);
+        {
+            std::scoped_lock vlock(victims_mutex_);
+            if (victims_.count(my_id)) {
+                victims_.erase(my_id);
+                throw TransactionAbortException(my_id, AbortReason::DEADLOCK_PREVENTION);
+            }
         }
     }
 
@@ -335,18 +339,21 @@ txn_id_t LockManager::find_deadlock_victim(txn_id_t requestor, const LockRequest
     }
     if (blockers.empty()) return INVALID_TXN_ID;
 
-    // Build wait-for graph from all lock queues. Edge: waiter -> holder.
+    // Build wait-for graph from all lock queues across all shards. Edge: waiter -> holder.
+    // Best-effort snapshot — we only hold one shard latch; other shards may race.
     std::unordered_map<txn_id_t, std::unordered_set<txn_id_t>> wait_for;
-    for (auto& [id, q] : lock_table_) {
-        std::unordered_set<txn_id_t> held_by;
-        for (auto& req : q.request_queue_) {
-            if (req.granted_) held_by.insert(req.txn_id_);
-        }
-        for (auto& req : q.request_queue_) {
-            if (!req.granted_) {
-                for (auto holder : held_by) {
-                    if (holder != req.txn_id_) {
-                        wait_for[req.txn_id_].insert(holder);
+    for (int si = 0; si < LOCK_TABLE_SHARDS; ++si) { auto& sh = shards_[si];
+        for (auto& [id, q] : sh.table_) {
+            std::unordered_set<txn_id_t> held_by;
+            for (auto& req : q.request_queue_) {
+                if (req.granted_) held_by.insert(req.txn_id_);
+            }
+            for (auto& req : q.request_queue_) {
+                if (!req.granted_) {
+                    for (auto holder : held_by) {
+                        if (holder != req.txn_id_) {
+                            wait_for[req.txn_id_].insert(holder);
+                        }
                     }
                 }
             }
@@ -395,10 +402,11 @@ txn_id_t LockManager::find_deadlock_victim(txn_id_t requestor, const LockRequest
 }
 
 bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
-    std::unique_lock<std::mutex> lock(latch_);
+    auto& shard = shards_[shard_of(lock_data_id)];
+    std::unique_lock<std::mutex> lock(shard.latch_);
 
-    auto it = lock_table_.find(lock_data_id);
-    if (it == lock_table_.end()) {
+    auto it = shard.table_.find(lock_data_id);
+    if (it == shard.table_.end()) {
         return false;
     }
 
@@ -416,7 +424,7 @@ bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
 
             // Clean up empty queues
             if (requests.empty()) {
-                lock_table_.erase(it);
+                shard.table_.erase(it);
             }
 
             return true;
@@ -484,11 +492,15 @@ void LockManager::CheckDeadlock() {
     }
     if (victim == INVALID_TXN_ID) return;
     {
-        std::scoped_lock lock(latch_);
+        std::scoped_lock vlock(victims_mutex_);
         victims_.insert(victim);
+    }
 
-        // Find the queue where the victim has an ungranted request and wake it
-        for (auto& [id, queue] : lock_table_) {
+    // Find the queue where the victim has an ungranted request and wake it.
+    // Iterate all shards; briefly lock each to safely inspect its table.
+    for (int si = 0; si < LOCK_TABLE_SHARDS; ++si) { auto& sh = shards_[si];
+        std::scoped_lock slock(sh.latch_);
+        for (auto& [id, queue] : sh.table_) {
             for (auto& req : queue.request_queue_) {
                 if (req.txn_id_ == victim && !req.granted_) {
                     queue.cv_.notify_all();
@@ -496,8 +508,8 @@ void LockManager::CheckDeadlock() {
                 }
             }
         }
-        done_wake:;
     }
+    done_wake:;
 
     // Clean up the victim's waits-for edges
     remove_all_edges(victim);
