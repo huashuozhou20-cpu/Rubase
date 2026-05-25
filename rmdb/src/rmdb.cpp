@@ -29,6 +29,7 @@ See the Mulan PSL v2 for more details. */
 #include "common/sampler.h"
 #endif
 #include "network/epoll_server.h"
+#include "network/http_server.h"
 
 #define DEFAULT_PORT 8765
 
@@ -695,17 +696,183 @@ send_response:
 
 
 // ============================================================================
+// Core query execution — shared by TCP (process_query) and HTTP (execute_sql).
+// Returns the text result as a string.
+// ============================================================================
+static std::string execute_query_core(const std::string &stmt_str) {
+    char data_send[BUFFER_LENGTH];
+    memset(data_send, 0, BUFFER_LENGTH);
+    int offset = 0;
+
+    static thread_local int gc_slot = txn_manager->RegisterThread();
+    int64_t txn_id = begin_autocommit_txn();
+    Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr,
+                                   data_send, &offset);
+    context->txn_mgr_ = txn_manager.get();
+    context->txn_ = txn_manager->get_transaction(txn_id);
+
+    if (gc_slot >= 0 && context->txn_) {
+        txn_manager->SetThreadActiveTs(gc_slot, context->txn_->get_read_ts());
+    }
+    context->txn_mgr_ = txn_manager.get();
+    context->txn_ = txn_manager->get_transaction(txn_id);
+
+    std::shared_ptr<ast::TreeNode> local_ast = try_fast_path(stmt_str);
+
+    YY_BUFFER_STATE parser_buf = nullptr;
+    bool parser_mutex_held = false;
+    CachedPlanType cache_pattern = CachedPlanType::NONE;
+
+    // Plan cache check
+    if (local_ast) {
+        auto pat = identify_pattern(local_ast);
+        if (pat != CachedPlanType::NONE) {
+            auto &cached = tls_plan_cache[static_cast<int>(pat)];
+            if (cached) {
+                std::shared_ptr<Plan> plan = clone_and_rebind(pat, cached, local_ast, sm_manager.get());
+                if (auto dml = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+                    if (dml->is_for_update_ && context->txn_) {
+                        context->txn_->set_read_only(false);
+                        context->is_for_update_ = true;
+                    }
+                }
+                try {
+                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
+                    portal->run(portalStmt, ql_manager.get(), &txn_id, context);
+                    portal->drop();
+                } catch (TransactionAbortException &e) {
+                    txn_manager->abort(context->txn_, log_manager.get());
+                    if (gc_slot >= 0) txn_manager->SetThreadActiveTs(gc_slot, INT64_MAX);
+                    delete context;
+                    return R"({"error":"transaction aborted"})";
+                } catch (RMDBError &e) {
+                    if (gc_slot >= 0) txn_manager->SetThreadActiveTs(gc_slot, INT64_MAX);
+                    delete context;
+                    return std::string(R"({"error":")") + e.what() + "\"}";
+                }
+                goto finish;
+            }
+        }
+    }
+
+    // Parse
+    if (!local_ast) {
+        pthread_mutex_lock(&buffer_mutex);
+        parser_mutex_held = true;
+        parser_buf = yy_scan_string(stmt_str.c_str());
+        if (yyparse() != 0 || ast::parse_tree == nullptr) {
+            yy_delete_buffer(parser_buf);
+            pthread_mutex_unlock(&buffer_mutex);
+            parser_mutex_held = false;
+            if (gc_slot >= 0) txn_manager->SetThreadActiveTs(gc_slot, INT64_MAX);
+            delete context;
+            return R"({"error":"syntax error"})";
+        }
+        local_ast = ast::parse_tree;
+    } else {
+        pthread_mutex_lock(&buffer_mutex);
+        parser_mutex_held = true;
+    }
+
+    if (local_ast != nullptr) {
+        try {
+            if (auto stmt = std::dynamic_pointer_cast<ast::SelectStmt>(local_ast))
+                resolve_subqueries(stmt->cond);
+            std::shared_ptr<Query> query = analyze->do_analyze(local_ast);
+
+            if (parser_mutex_held) {
+                if (parser_buf) yy_delete_buffer(parser_buf);
+                pthread_mutex_unlock(&buffer_mutex);
+                parser_mutex_held = false;
+            }
+
+            std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
+
+            cache_pattern = identify_pattern(local_ast);
+            if (cache_pattern != CachedPlanType::NONE &&
+                !tls_plan_cache[static_cast<int>(cache_pattern)]) {
+                tls_plan_cache[static_cast<int>(cache_pattern)] =
+                    clone_plan(plan, sm_manager.get());
+            }
+
+            if (auto dml = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+                if (dml->is_for_update_ && context->txn_) {
+                    context->txn_->set_read_only(false);
+                    context->is_for_update_ = true;
+                }
+            }
+            std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
+            portal->run(portalStmt, ql_manager.get(), &txn_id, context);
+            portal->drop();
+        } catch (TransactionAbortException &e) {
+            txn_manager->abort(context->txn_, log_manager.get());
+            if (parser_mutex_held) { yy_delete_buffer(parser_buf); pthread_mutex_unlock(&buffer_mutex); }
+            if (gc_slot >= 0) txn_manager->SetThreadActiveTs(gc_slot, INT64_MAX);
+            delete context;
+            return R"({"error":"transaction aborted"})";
+        } catch (RMDBError &e) {
+            if (parser_mutex_held) { yy_delete_buffer(parser_buf); pthread_mutex_unlock(&buffer_mutex); }
+            if (gc_slot >= 0) txn_manager->SetThreadActiveTs(gc_slot, INT64_MAX);
+            delete context;
+            return std::string(R"({"error":")") + e.what() + "\"}";
+        }
+    }
+
+    if (parser_mutex_held) {
+        if (parser_buf) yy_delete_buffer(parser_buf);
+        pthread_mutex_unlock(&buffer_mutex);
+    }
+
+finish:
+    if (context->txn_ && !context->txn_->get_txn_mode()) {
+        txn_manager->commit(context->txn_, log_manager.get());
+    }
+    if (gc_slot >= 0) {
+        txn_manager->SetThreadActiveTs(gc_slot, INT64_MAX);
+    }
+
+    std::string result(data_send, offset);
+    delete context;
+    return result;
+}
+
+// Convert the pipe-delimited text output into JSON.
+static std::string text_to_json(const std::string &text) {
+    // Quick check: if it's an error from execute_query_core, return as-is
+    if (text.rfind("{\"error\"", 0) == 0) return text;
+
+    std::string json = "{\"result\":";
+    // Escape the text for JSON
+    json += "\"";
+    for (char c : text) {
+        switch (c) {
+            case '\n': json += "\\n"; break;
+            case '\r': break;  // skip \r
+            case '"':  json += "\\\""; break;
+            case '\\': json += "\\\\"; break;
+            default:   json += c;
+        }
+    }
+    json += "\"}";
+    return json;
+}
+
+// ============================================================================
 // Epoll-based server main — single I/O thread + worker pool
 // ============================================================================
 int main(int argc, char **argv) {
-    if (argc < 2 || argc > 3) {
-        std::cerr << "Usage: " << argv[0] << " <database> [port]" << std::endl;
+    if (argc < 2 || argc > 4) {
+        std::cerr << "Usage: " << argv[0] << " <database> [tcp_port] [http_port]" << std::endl;
         exit(1);
     }
 
     int port = DEFAULT_PORT;
+    int http_port = 0;
     if (argc >= 3) {
         port = std::stoi(argv[2]);
+    }
+    if (argc >= 4) {
+        http_port = std::stoi(argv[3]);
     }
 
     signal(SIGINT, sigint_handler);
@@ -747,6 +914,19 @@ int main(int argc, char **argv) {
         EpollServer server(port, process_query, num_workers);
         g_server = &server;
 
+    // ---- HTTP REST server (optional, separate port) ----
+    std::unique_ptr<HttpServer> http_server;
+    if (http_port > 0) {
+        http_server = std::make_unique<HttpServer>(http_port,
+            [](const std::string &method, const std::string &path,
+               const std::string &body) -> std::string {
+                if (method != "POST" || path.find("/query") != 0)
+                    return R"({"error":"use POST /query"})";
+                return text_to_json(execute_query_core(body));
+            });
+        http_server->start();
+    }
+
 #ifdef ENABLE_PROFILING
         // Start CPU profiler after all initialization is complete
         Sampler::start("/tmp/rmdb_samples.bin");
@@ -754,6 +934,7 @@ int main(int argc, char **argv) {
 
         server.run();
         g_server = nullptr;
+        if (http_server) http_server->stop();
 
     } catch (RMDBError &e) {
         std::cerr << e.what() << std::endl;
