@@ -1,25 +1,27 @@
-=== Sat May 23 10:47:12 PM CST 2026 ===
+=== Mon May 25 12:45:58 CST 2026 ===
 >>> git pull
-From github.com:huashuozhou20-cpu/Rubase
- * branch            main       -> FETCH_HEAD
-Already up to date.
+ssh: connect to host github.com port 22: Connection timed out
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
 >>> system info
-host=iZuf6ig58ffzu9up0f2hjoZ cpu=4 commit=77edb66 test: server 05-23 22:43
-Linux iZuf6ig58ffzu9up0f2hjoZ 5.15.0-177-generic #187-Ubuntu SMP Sat Apr 11 22:54:33 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
-Mem:           3.4Gi       265Mi       2.6Gi       2.0Mi       557Mi       2.9Gi
+host=DESKTOP-V52GVNM cpu=4 commit=098f8ff test: server 05-23 22:49
+Linux DESKTOP-V52GVNM 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+Mem:            15Gi       1.1Gi        13Gi       3.8Mi       1.3Gi        14Gi
 >>> build release
--- Configuring done
--- Generating done
--- Build files have been written to: /home/obuser/Rubase/rmdb/build
+-- Configuring done (0.3s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/obuser/Rubase/db2025/rmdb/build
+[ 76%] Built target execution
+[ 80%] Built target unit_test
 [ 91%] Built target parser
-Consolidate compiler generated dependencies of target test_parser
-Consolidate compiler generated dependencies of target rmdb
 [ 94%] Built target test_parser
 [100%] Built target rmdb
 >>> unit test
 [  PASSED  ] 5 tests.
 >>> sysbench 4 threads
-  [prepare] Done: 552 rows in sbtest
+  [prepare] Done: 997 rows in sbtest
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -32,29 +34,12 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 4 eps: 906.99 lat (ms,95%): 4.91
-[ 10s ] thds: 4 eps: 907.25 lat (ms,95%): 4.91
-[ 15s ] thds: 4 eps: 907.98 lat (ms,95%): 4.91
-
-General statistics:
-    total time:                          15.0017s
-    total number of events:              13616
-
-Latency (ms):
-         min:                                    0.63
-         avg:                                    4.41
-         max:                                    5.66
-         95th percentile:                        4.91
-         sum:                                59996.19
-
-Threads fairness:
-    events (avg/stddev):           3404.0000/0.00
-    execution time (avg/stddev):   14.9990/0.00
-
+[ 5s ] thds: 4 eps: 309.64 lat (ms,95%): 9.91
+[ 10s ] thds: 4 eps: 0.00 lat (ms,95%): 0.00
 server-errors: 0
 0
 >>> sysbench 8 threads
-  [prepare] Done: 552 rows in sbtest
+  [prepare] Done: 997 rows in sbtest
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -67,29 +52,12 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 8 eps: 909.41 lat (ms,95%): 9.39
-[ 10s ] thds: 8 eps: 909.64 lat (ms,95%): 9.39
-[ 15s ] thds: 8 eps: 908.79 lat (ms,95%): 9.39
-
-General statistics:
-    total time:                          15.0086s
-    total number of events:              13648
-
-Latency (ms):
-         min:                                    0.91
-         avg:                                    8.80
-         max:                                   10.79
-         95th percentile:                        9.39
-         sum:                               120035.68
-
-Threads fairness:
-    events (avg/stddev):           1706.0000/0.00
-    execution time (avg/stddev):   15.0045/0.00
-
+[ 5s ] thds: 8 eps: 43.98 lat (ms,95%): 36.89
+[ 10s ] thds: 8 eps: 0.00 lat (ms,95%): 0.00
 server-errors: 0
 0
 >>> sysbench 16 threads
-  [prepare] Done: 552 rows in sbtest
+  [prepare] Done: 998 rows in sbtest
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -102,29 +70,12 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 16 eps: 909.59 lat (ms,95%): 18.28
-[ 10s ] thds: 16 eps: 908.83 lat (ms,95%): 18.28
-[ 15s ] thds: 16 eps: 908.80 lat (ms,95%): 18.28
-
-General statistics:
-    total time:                          15.0169s
-    total number of events:              13653
-
-Latency (ms):
-         min:                                    0.71
-         avg:                                   17.59
-         max:                                   25.07
-         95th percentile:                       18.28
-         sum:                               240138.77
-
-Threads fairness:
-    events (avg/stddev):           853.3125/0.46
-    execution time (avg/stddev):   15.0087/0.00
-
+[ 5s ] thds: 16 eps: 115.35 lat (ms,95%): 51.94
+[ 10s ] thds: 16 eps: 0.00 lat (ms,95%): 0.00
 server-errors: 0
 0
 >>> sysbench 32 threads
-  [prepare] Done: 552 rows in sbtest
+  [prepare] Done: 997 rows in sbtest
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -137,34 +88,17 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 32 eps: 910.21 lat (ms,95%): 35.59
-[ 10s ] thds: 32 eps: 909.82 lat (ms,95%): 35.59
-[ 15s ] thds: 32 eps: 907.98 lat (ms,95%): 35.59
-
-General statistics:
-    total time:                          15.0319s
-    total number of events:              13672
-
-Latency (ms):
-         min:                                    0.94
-         avg:                                   35.14
-         max:                                   42.26
-         95th percentile:                       35.59
-         sum:                               480487.44
-
-Threads fairness:
-    events (avg/stddev):           427.2500/0.43
-    execution time (avg/stddev):   15.0152/0.01
-
+[ 5s ] thds: 32 eps: 149.34 lat (ms,95%): 70.55
+[ 10s ] thds: 32 eps: 0.00 lat (ms,95%): 0.00
 server-errors: 0
 0
 >>> memory-only build (DISABLE_FSYNC)
--- Build files have been written to: /home/obuser/Rubase/rmdb/build_nofsync
-lto-wrapper: warning: using serial compilation of 13 LTRANS jobs
-[100%] Built target unit_test
+-- Build files have been written to: /home/obuser/Rubase/db2025/rmdb/build_nofsync
+lto-wrapper: warning: using serial compilation of 12 LTRANS jobs
+lto-wrapper: note: see the ‘-flto’ option documentation for more information
 [100%] Built target rmdb
 >>> memory-only 4 threads
-  [prepare] Done: 552 rows in sbtest
+  [prepare] Done: 998 rows in sbtest
 sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
 
 Running the test with following options:
@@ -177,25 +111,8 @@ Initializing worker threads...
 
 Threads started!
 
-[ 5s ] thds: 4 eps: 1305.71 lat (ms,95%): 3.55
-[ 10s ] thds: 4 eps: 1306.08 lat (ms,95%): 3.62
-[ 15s ] thds: 4 eps: 1305.60 lat (ms,95%): 3.62
-
-General statistics:
-    total time:                          15.0020s
-    total number of events:              19592
-
-Latency (ms):
-         min:                                    0.25
-         avg:                                    3.06
-         max:                                    4.64
-         95th percentile:                        3.62
-         sum:                                59995.34
-
-Threads fairness:
-    events (avg/stddev):           4898.0000/0.00
-    execution time (avg/stddev):   14.9988/0.00
-
+[ 5s ] thds: 4 eps: 512.32 lat (ms,95%): 4.18
+[ 10s ] thds: 4 eps: 0.00 lat (ms,95%): 0.00
 server-errors: 0
 0
 >>> push results
