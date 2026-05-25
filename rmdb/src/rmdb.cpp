@@ -174,6 +174,91 @@ void resolve_subqueries(std::shared_ptr<ast::TreeNode> node) {
 }
 
 // ============================================================================
+// Fast-path SQL dispatch: bypass yyparse() for known sysbench OLTP patterns.
+// The parser is a serialization point (buffer_mutex) and a CPU hotspot —
+// constructing the AST directly skips both costs for the hot workload.
+// Returns nullptr if the statement does not match a recognised pattern.
+// ============================================================================
+static std::shared_ptr<ast::TreeNode> try_fast_path(const std::string &stmt_str) {
+    const char *s = stmt_str.c_str();
+    while (*s == ' ' || *s == '\t' || *s == '\n') ++s;
+
+    char tab[64];
+    int v1 = 0, v2 = 0, pos = 0;
+
+    // ---- UPDATE <table> SET val=<int> WHERE id=<int> ----
+    if (sscanf(s, "UPDATE %63s SET val = %d WHERE id = %d %n", tab, &v1, &v2, &pos) >= 3 && pos > 0) {
+        // Verify remaining is only trailing ';' and whitespace
+        for (const char *p = s + pos; *p; ++p)
+            if (*p != ' ' && *p != ';' && *p != '\t' && *p != '\n') goto not_update;
+        std::vector<std::shared_ptr<ast::SetClause>> set_clauses;
+        set_clauses.push_back(std::make_shared<ast::SetClause>("val", std::make_shared<ast::IntLit>(v1)));
+        auto lhs = std::make_shared<ast::Col>("", "id");
+        auto rhs = std::make_shared<ast::IntLit>(v2);
+        auto cond = std::make_shared<ast::BinaryExpr>(lhs, ast::SV_OP_EQ, rhs);
+        return std::make_shared<ast::UpdateStmt>(std::string(tab), std::move(set_clauses), cond);
+    }
+    not_update:
+
+    // ---- DELETE FROM <table> WHERE id=<int> ----
+    pos = 0;
+    if (sscanf(s, "DELETE FROM %63s WHERE id = %d %n", tab, &v1, &pos) >= 2 && pos > 0) {
+        for (const char *p = s + pos; *p; ++p)
+            if (*p != ' ' && *p != ';' && *p != '\t' && *p != '\n') goto not_delete;
+        auto lhs = std::make_shared<ast::Col>("", "id");
+        auto rhs = std::make_shared<ast::IntLit>(v1);
+        auto cond = std::make_shared<ast::BinaryExpr>(lhs, ast::SV_OP_EQ, rhs);
+        return std::make_shared<ast::DeleteStmt>(std::string(tab), cond);
+    }
+    not_delete:
+
+    // ---- SELECT * FROM <table> WHERE id BETWEEN <int> AND <int> AND val + 1 > 0 ----
+    pos = 0;
+    if (sscanf(s, "SELECT * FROM %63s WHERE id BETWEEN %d AND %d AND val + 1 > 0 %n",
+               tab, &v1, &v2, &pos) >= 3 && pos > 0) {
+        for (const char *p = s + pos; *p; ++p)
+            if (*p != ' ' && *p != ';' && *p != '\t' && *p != '\n') goto not_select;
+        auto between = std::make_shared<ast::BetweenExpr>(
+            std::make_shared<ast::Col>("", "id"), false,
+            std::make_shared<ast::IntLit>(v1), std::make_shared<ast::IntLit>(v2));
+        auto val_plus_1 = std::make_shared<ast::ArithExpr>(
+            std::make_shared<ast::Col>("", "val"), ast::ARITH_ADD,
+            std::make_shared<ast::IntLit>(1));
+        auto gt_zero = std::make_shared<ast::BinaryExpr>(
+            val_plus_1, ast::SV_OP_GT, std::make_shared<ast::IntLit>(0));
+        std::vector<std::shared_ptr<ast::CondExpr>> args;
+        args.push_back(between);
+        args.push_back(gt_zero);
+        auto cond = std::make_shared<ast::LogicExpr>(ast::LOGIC_AND, std::move(args));
+        auto sel = std::make_shared<ast::SelectStmt>();
+        sel->tabs.push_back(std::string(tab));
+        sel->cond = cond;
+        return sel;
+    }
+    not_select:
+
+    // ---- INSERT INTO <table> VALUES(<int>, <int>, '<str>') ----
+    pos = 0;
+    char padding[256];
+    if (sscanf(s, "INSERT INTO %63s VALUES ( %d , %d , '%255[^']' ) %n",
+               tab, &v1, &v2, padding, &pos) >= 4 && pos > 0) {
+        for (const char *p = s + pos; *p; ++p)
+            if (*p != ' ' && *p != ';' && *p != '\t' && *p != '\n') goto not_insert;
+        std::vector<std::shared_ptr<ast::Value>> row;
+        row.push_back(std::make_shared<ast::IntLit>(v1));
+        row.push_back(std::make_shared<ast::IntLit>(v2));
+        row.push_back(std::make_shared<ast::StringLit>(std::string(padding)));
+        std::vector<std::vector<std::shared_ptr<ast::Value>>> vals;
+        vals.push_back(std::move(row));
+        return std::make_shared<ast::InsertStmt>(std::string(tab),
+            std::vector<std::string>{}, std::move(vals));
+    }
+    not_insert:
+
+    return nullptr;
+}
+
+// ============================================================================
 // Per-query processing function — called by worker pool threads.
 // Each call handles exactly one SQL statement on one connection.
 // Results are written back via g_server->enqueue_response().
@@ -202,81 +287,100 @@ static void process_query(int conn_fd, const std::string &stmt_str) {
     context->txn_mgr_ = txn_manager.get();
     context->txn_ = txn_manager->get_transaction(txn_id);
 
-    bool finish_analyze = false;
+    // ---- Phase 1: build AST (fast-path or full parser) ----
+    // The fast path constructs the AST directly from a string-prefix match,
+    // skipping the yyparse() CPU overhead.  do_analyze() still runs under
+    // buffer_mutex because it may touch shared catalog / metadata state that
+    // was originally serialised by the parser mutex.
+    std::shared_ptr<ast::TreeNode> local_ast = try_fast_path(stmt_str);
 
-    pthread_mutex_lock(&buffer_mutex);
-    YY_BUFFER_STATE buf = yy_scan_string(stmt_str.c_str());
-    if (yyparse() == 0) {
-        if (ast::parse_tree != nullptr) {
-            try {
-                // CREATE VIEW / DROP VIEW
-                if (auto cv = std::dynamic_pointer_cast<ast::CreateView>(ast::parse_tree)) {
-                    {
-                        std::lock_guard<std::mutex> lock(view_mutex);
-                        view_defs[cv->view_name] = cv->select_stmt;
-                    }
-                    sm_manager->create_view(cv->view_name, "");
-                    Result r{Result::SUCCESS, ""};
-                    memcpy(data_send, r.msg.c_str(), r.msg.length());
-                    offset = r.msg.length();
-                    yy_delete_buffer(buf);
-                    finish_analyze = true;
-                    pthread_mutex_unlock(&buffer_mutex);
-                    goto send_response;
-                }
-                if (auto dv = std::dynamic_pointer_cast<ast::DropView>(ast::parse_tree)) {
-                    {
-                        std::lock_guard<std::mutex> lock(view_mutex);
-                        view_defs.erase(dv->view_name);
-                    }
-                    sm_manager->drop_view(dv->view_name);
-                    Result r{Result::SUCCESS, ""};
-                    memcpy(data_send, r.msg.c_str(), r.msg.length());
-                    offset = r.msg.length();
-                    yy_delete_buffer(buf);
-                    finish_analyze = true;
-                    pthread_mutex_unlock(&buffer_mutex);
-                    goto send_response;
-                }
-                if (auto stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
-                    resolve_subqueries(stmt->cond);
-                }
-                std::shared_ptr<Query> query = analyze->do_analyze(ast::parse_tree);
-                yy_delete_buffer(buf);
-                finish_analyze = true;
-                pthread_mutex_unlock(&buffer_mutex);
+    YY_BUFFER_STATE parser_buf = nullptr;
+    bool parser_mutex_held = false;
 
-                std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
-                if (auto dml = std::dynamic_pointer_cast<DMLPlan>(plan)) {
-                    if (dml->is_for_update_ && context->txn_) {
-                        context->txn_->set_read_only(false);
-                        context->is_for_update_ = true;
-                    }
-                }
-                std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
-                portal->run(portalStmt, ql_manager.get(), &txn_id, context);
-                portal->drop();
-            } catch (TransactionAbortException &e) {
-                Result result{Result::ABORT, "abort\n"};
-                memcpy(data_send, result.msg.c_str(), result.msg.length());
-                offset = result.msg.length();
-                txn_manager->abort(context->txn_, log_manager.get());
-            } catch (RMDBError &e) {
-                Result result{Result::FAILURE, std::string(e.what()) + "\n"};
-                memcpy(data_send, result.msg.c_str(), result.msg.length());
-                offset = result.msg.length();
-            }
+    if (!local_ast) {
+        pthread_mutex_lock(&buffer_mutex);
+        parser_mutex_held = true;
+        parser_buf = yy_scan_string(stmt_str.c_str());
+        if (yyparse() != 0 || ast::parse_tree == nullptr) {
+            yy_delete_buffer(parser_buf);
+            pthread_mutex_unlock(&buffer_mutex);
+            parser_mutex_held = false;
+            std::string err = "Parser Error: syntax error\n";
+            memcpy(data_send, err.c_str(), err.length());
+            offset = err.length();
+            goto send_response;
         }
+        local_ast = ast::parse_tree;
     } else {
-        yy_delete_buffer(buf);
-        finish_analyze = true;
-        pthread_mutex_unlock(&buffer_mutex);
-        std::string err = "Parser Error: syntax error\n";
-        memcpy(data_send, err.c_str(), err.length());
-        offset = err.length();
+        // Fast-path succeeded: acquire mutex for analysis phase.
+        // We still serialise do_analyze() to match the original contract.
+        pthread_mutex_lock(&buffer_mutex);
+        parser_mutex_held = true;
     }
-    if (!finish_analyze) {
-        yy_delete_buffer(buf);
+
+    // ---- Phase 2: analyse + execute AST (common for both paths) ----
+    if (local_ast != nullptr) {
+        try {
+            // CREATE VIEW / DROP VIEW (parser path only — not in fast-path patterns)
+            if (auto cv = std::dynamic_pointer_cast<ast::CreateView>(local_ast)) {
+                {
+                    std::lock_guard<std::mutex> lock(view_mutex);
+                    view_defs[cv->view_name] = cv->select_stmt;
+                }
+                sm_manager->create_view(cv->view_name, "");
+                Result r{Result::SUCCESS, ""};
+                memcpy(data_send, r.msg.c_str(), r.msg.length());
+                offset = r.msg.length();
+                goto cleanup_parser;
+            }
+            if (auto dv = std::dynamic_pointer_cast<ast::DropView>(local_ast)) {
+                {
+                    std::lock_guard<std::mutex> lock(view_mutex);
+                    view_defs.erase(dv->view_name);
+                }
+                sm_manager->drop_view(dv->view_name);
+                Result r{Result::SUCCESS, ""};
+                memcpy(data_send, r.msg.c_str(), r.msg.length());
+                offset = r.msg.length();
+                goto cleanup_parser;
+            }
+            if (auto stmt = std::dynamic_pointer_cast<ast::SelectStmt>(local_ast)) {
+                resolve_subqueries(stmt->cond);
+            }
+            std::shared_ptr<Query> query = analyze->do_analyze(local_ast);
+
+            // Release parser resources now that analysis consumed the AST
+            if (parser_mutex_held) {
+                if (parser_buf) yy_delete_buffer(parser_buf);
+                pthread_mutex_unlock(&buffer_mutex);
+                parser_mutex_held = false;
+            }
+
+            std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
+            if (auto dml = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+                if (dml->is_for_update_ && context->txn_) {
+                    context->txn_->set_read_only(false);
+                    context->is_for_update_ = true;
+                }
+            }
+            std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
+            portal->run(portalStmt, ql_manager.get(), &txn_id, context);
+            portal->drop();
+        } catch (TransactionAbortException &e) {
+            Result result{Result::ABORT, "abort\n"};
+            memcpy(data_send, result.msg.c_str(), result.msg.length());
+            offset = result.msg.length();
+            txn_manager->abort(context->txn_, log_manager.get());
+        } catch (RMDBError &e) {
+            Result result{Result::FAILURE, std::string(e.what()) + "\n"};
+            memcpy(data_send, result.msg.c_str(), result.msg.length());
+            offset = result.msg.length();
+        }
+    }
+
+cleanup_parser:
+    if (parser_mutex_held) {
+        if (parser_buf) yy_delete_buffer(parser_buf);
         pthread_mutex_unlock(&buffer_mutex);
     }
 

@@ -97,7 +97,13 @@ class ReaderWriterSpinLatch {
     // Return the current version sequence.  An odd value means a writer is
     // active; an even value means the page is quiescent and can be read
     // optimistically (without acquiring rlock).
+    //
+    // Relaxed is safe here because the leaf rlock() in find_leaf_page provides
+    // the necessary acquire barrier before data is read.  The lock-free path
+    // uses GetSequence as a heuristic to detect concurrent splits — a false
+    // negative (missed split) only causes a wasted descent that is caught by
+    // the leaf rlock, and a false positive only causes a cheap restart.
     uint64_t GetSequence() const {
-        return sequence_.load(std::memory_order_acquire);
+        return sequence_.load(std::memory_order_relaxed);
     }
 };

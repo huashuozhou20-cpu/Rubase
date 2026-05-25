@@ -261,7 +261,7 @@ timestamp_t TransactionManager::GetWatermark() {
 int TransactionManager::RegisterThread() {
     for (int i = 0; i < MAX_THREADS; ++i) {
         timestamp_t expected = 0;
-        if (thread_active_ts_[i].compare_exchange_strong(expected, INT64_MAX)) {
+        if (thread_active_ts_[i].active_ts.compare_exchange_strong(expected, INT64_MAX)) {
             return i;
         }
     }
@@ -270,7 +270,7 @@ int TransactionManager::RegisterThread() {
 
 void TransactionManager::UnregisterThread(int slot) {
     if (slot >= 0 && slot < MAX_THREADS) {
-        thread_active_ts_[slot].store(0, std::memory_order_release);
+        thread_active_ts_[slot].active_ts.store(0, std::memory_order_release);
     }
 }
 
@@ -283,7 +283,7 @@ void TransactionManager::GarbageCollection() {
     // does not constrain GC.
     timestamp_t global_min = INT64_MAX;
     for (int i = 0; i < MAX_THREADS; ++i) {
-        timestamp_t ts = thread_active_ts_[i].load(std::memory_order_acquire);
+        timestamp_t ts = thread_active_ts_[i].active_ts.load(std::memory_order_acquire);
         if (ts > 0 && ts < global_min) global_min = ts;
     }
     // Also respect the system watermark

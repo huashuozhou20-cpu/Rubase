@@ -85,12 +85,21 @@ public:
     // Watermark-based GC: worker threads register their current read_ts
     // before accessing MVCC state.  GC computes the global minimum across
     // all threads and only deletes txns below that threshold.
+    //
+    // Each slot is cache-line aligned (64 bytes) to eliminate false sharing:
+    // without padding, 8 adjacent atomics (8×8=64B) share one cache line,
+    // so a write by core A invalidates the line on core B even though they
+    // touch different slots — forcing costly cache-line reloads on every
+    // SetThreadActiveTs() call from different workers.
     static constexpr int MAX_THREADS = 128;
-    std::atomic<timestamp_t> thread_active_ts_[MAX_THREADS]{};
+    struct alignas(64) ThreadSlot {
+        std::atomic<timestamp_t> active_ts{0};
+    };
+    ThreadSlot thread_active_ts_[MAX_THREADS]{};
     int RegisterThread();
     void UnregisterThread(int slot);
     void SetThreadActiveTs(int slot, timestamp_t ts) {
-        thread_active_ts_[slot].store(ts, std::memory_order_release);
+        thread_active_ts_[slot].active_ts.store(ts, std::memory_order_release);
     }
 
     static std::unordered_map<txn_id_t, Transaction *> txn_map;
